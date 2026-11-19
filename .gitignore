@@ -1,0 +1,6 @@
+# Datos locales del generador DL 2.0: valores del cliente, catálogos, CSV de trabajo y salidas (SENSIBLE)
+scripts/in/
+scripts/out/
+**/cliente.yaml
+**/trazabilidad_dl1.csv
+__pycache__/

@@ -1,0 +1,33 @@
+# Plantilla de in/cliente.yaml con valores ficticios. Copiar a scripts/in/cliente.yaml y completar localmente.
+# El archivo real NO se versiona (ver .gitignore).
+repos_raiz: acme-repos
+dir_artifacts: acme-artifacts
+dir_models: acme-models
+dir_legacy: acme-legacy
+rama_prd_legacy: legacy-prod
+dbt_proyecto: acme_dbt
+bu: xx
+ind: yy
+comp_id: acme
+team_to_report: acmeops
+team_to_report_dev: acmeops
+equipo: acme_ingestas
+email_key: EMAIL_ALERTAS
+env_dev: env-dev
+env_prd: env-prd
+ramas_protegidas: [env-dev, env-prd, env-pre-prd]
+ambiente_sufijo: {env-prd: prd, env-dev: qa}
+dbt_env: {env-dev: dev, env-prd: prd}
+recursos: {LND_BUCKET: 'acme-lnd-{s}-{amb}', RAW_BUCKET: 'acme-raw-{s}-{amb}', RAW_DATASET: 'raw_{sis}'}
+ods_owner_regex: ^(USR_A|USR_B)
+catalogo_sistemas: {SISTEMAX: sistemax}
+pt_others: PT_IU_OTHERS
+pt_cuarentena: POLICY_TAG_CUARENTENA
+topicos:
+  jdbc: [START_TOPIC, null]
+  cipher: [START_TOPIC_CIPHER, START_TOPIC_CIPHER_PROJECT]
+palabras_vacias_extra: []
+recurso_nombre: {}
+aprobacion_total: false
+umbral_borrado: 0.2
+prefijo_dag: xx_
