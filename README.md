@@ -6,6 +6,7 @@ Utilidades sueltas de soporte para el día a día.
 |---|---|
 | `scripts/verificar_reorden.py` | Verifica que reordenar un YAML no quitó/cambió valores vs `git show <ref>:<ruta>`. Detecta llaves duplicadas. No imprime valores. Exit: 0 OK, 1 REVISAR, 2 no existe en ref. Requiere `pyyaml`. |
 | `scripts/agregar_faltantes.py` | Reinserta en `<file>` las llaves (líneas crudas) que existen en `<ref>` y faltan en el working copy, dentro del bloque `co-*` correcto, sin tocar líneas existentes. Valida antes de escribir (duplicadas, orden, EOL). `--dry-run`. Exit: 0 OK, 1 bloques solo en origen, 2 abortado. |
+| `scripts/agregar_faltantes_yaml.py` | Variante genérica de `agregar_faltantes.py` para `dbt_project.yml` (`vars`, `models:`): reinserta bloques completos (hijos + comentarios encima) que están en `<ref>` y faltan (p. ej. tras merge `--theirs`), después de su hermana anterior. Omite llaves movidas a propósito dentro de la misma sección raíz. Conserva CRLF/LF. `--dry-run`. Exit: 0 OK, 2 abortado. |
 | `scripts/comparar_vars_dbt.py` | Compara `vars` de `dbt_project.yml` vs `<ref>` por **valor efectivo** por ambiente (`vars.ambientes.<env>[K]` → `vars[K]` → FALTA). Valida mover claves entre `vars` comunes y `ambientes`. Exit: 0 OK, 1 REVISAR (CAMBIA/QUITADA), 2 error. |
 
 ```bash
@@ -13,5 +14,6 @@ Utilidades sueltas de soporte para el día a día.
 python ../../scratch/scripts/verificar_reorden.py co/variables.yaml        # vs HEAD
 python ../../scratch/scripts/verificar_reorden.py dbt_project.yml origin/main
 python ../../scratch/scripts/agregar_faltantes.py co/variables.yaml origin/main --dry-run
+python ../../scratch/scripts/agregar_faltantes_yaml.py dbt_project.yml origin/main --dry-run
 python ../../scratch/scripts/comparar_vars_dbt.py dbt_project.yml origin/main
 ```
