@@ -27,7 +27,8 @@ topicos:
   jdbc: [START_TOPIC, null]
   cipher: [START_TOPIC_CIPHER, START_TOPIC_CIPHER_PROJECT]
 palabras_vacias_extra: []
-recurso_nombre: {}
+sistema_nombre: {}
+nombres_anteriores: {}
 aprobacion_total: false
 umbral_borrado: 0.2
 prefijo_dag: xx_

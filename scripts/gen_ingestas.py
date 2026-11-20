@@ -3,7 +3,8 @@
 Generador DL 2.0 (v5): ingestas (artifacts) y modelos std (data-models) por sistema origen. UN SOLO COMANDO:
 
     python gen_ingestas.py                 # todas las tablas de in/new_migration_tables_to_dl2.csv
-    python gen_ingestas.py <sistema>       # solo un sistema origen
+    python gen_ingestas.py <sistema>       # solo un sistema origen (código de entrada; también acepta el nombre DL 2.0)
+    python gen_ingestas.py --sin-prueba    # no genera la ingesta de prueba de conexión (por defecto se genera una por sistema)
     El script SOLO LEE los repos: todo lo que genera queda en out/. Para llevar a la rama de trabajo las tablas LISTO:
     bash out/<sistema>/out/copiar_a_repos.sh   (lo ejecuta el usuario cuando decide; valida que no sea una rama protegida)
 
@@ -17,6 +18,8 @@ scripts/
           · <sis>_ddl.csv (opcional) · .estado.json (estado interno del script, oculto: no se edita)
     out/  ESTADO.md · trazabilidad_dl1.csv (SENSIBLE: valores de conexión DL 1.0)
           artifacts/co/data_source/<sis>/<tabla>/*  · artifacts/co/variables.yaml   (rutas del repo destino)
+          prueba_conexion/artifacts/co/data_source/<sis>/all_tables/<sis>_all_tables.yaml  (árbol APARTE: copiar_a_repos.sh no lo copia)
+          copiar_prueba_conexion.sh · retirar_prueba_conexion.sh   (solo ramas test/*; ver ESTADO.md «Prueba de conexión»)
           models/<dbt_proyecto>/models/std_<dominio>/<tabla>/* · models/.../std_<dominio>/__sources.yml
 
 Por sistema: scan (columnas DL 1.0 + DDL, tipos, policy tags, estado_gobierno) → conexión DL 1.0 (rama productiva)
@@ -24,13 +27,13 @@ Por sistema: scan (columnas DL 1.0 + DDL, tipos, policy tags, estado_gobierno) �
 queda nada POR_CONFIRMAR, ninguna columna incluida pendiente de Gobierno y sus llaves existen en los ambientes de desarrollo y producción del variables.yaml de la rama de trabajo.
 Repos: por defecto ../../<repos_raiz> de in/cliente.yaml (o --repos / DL2_REPOS). Nunca se escriben.
 """
-import argparse, contextlib, csv, hashlib, io, json, os, re, shutil, subprocess, sys, unicodedata
+import argparse, contextlib, copy, csv, hashlib, io, json, os, re, shutil, subprocess, sys, unicodedata
 from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
 import yaml
 
-VERSION, GEN, MARCA = "6.4", "v1", "dl2-gen"
+VERSION, GEN, MARCA = "6.6", "v1", "dl2-gen"   # v6.6 (20-nov-2026)
 HERE = Path(__file__).resolve().parent
 IN, OUT = HERE / "in", HERE / "out"          # in: catálogos y lista · out/<sistema>/{in,out}
 LISTA = IN / "new_migration_tables_to_dl2.csv"
@@ -50,7 +53,8 @@ CLIENTE_DEFECTO = {
     "pt_others": "PT_IU_OTHERS", "pt_cuarentena": "POLICY_TAG_CUARENTENA",
     "topicos": {"jdbc": ["START_TOPIC", None], "cipher": ["START_TOPIC_CIPHER", "START_TOPIC_CIPHER_PROJECT"]},
     "palabras_vacias_extra": [],   # opcional: palabras adicionales que el clasificador ignora
-    "recurso_nombre": {},          # opcional: {codigo_sistema: nombre} cuando el recurso (bucket, dataset raw) no usa el código
+    "sistema_nombre": {},          # opcional: {codigo_sistema: nombre DL 2.0}; todo lo emitido (carpetas, llaves, recursos, modelos) usa el nombre
+    "nombres_anteriores": {},      # opcional: {codigo_sistema: [nombres de recurso usados antes]} para migrar valores de buckets/dataset
     "aprobacion_total": False,     # True: solo `aprobado` pasa a LISTO (con False, `sugerido` también pasa)
     "umbral_borrado": 0.2,         # CDC: fracción de borrados sobre lo vigente a partir de la cual el modelo aborta
     "prefijo_dag": "xx_",          # prefijo del id del DAG de extracción en Composer: <prefijo><sistema>_<tabla>-extraction
@@ -61,6 +65,10 @@ def cargar_cliente():
     if CLIENTE_YAML.exists():
         datos = yaml.safe_load(CLIENTE_YAML.read_text(encoding="utf-8")) or {}
         cfg.update({k: v for k, v in datos.items() if k in CLIENTE_DEFECTO})
+        if datos.get("recurso_nombre") and not datos.get("sistema_nombre"):      # alias heredado (v6.2-v6.4)
+            cfg["sistema_nombre"] = datos["recurso_nombre"]
+            print("  AVISO: `recurso_nombre` de in/cliente.yaml es un alias heredado: ahora define el nombre DL 2.0 del sistema "
+                  "(carpetas, llaves, recursos y modelos); renombrarlo a `sistema_nombre`")
     return cfg
 
 CLI = cargar_cliente()
@@ -116,9 +124,13 @@ FIJOS = {"csv": {"separator": "|", "quotechar": '"', "escapechar": "\\", "quote_
 # Recursos por sistema con nombre por convención DL 2.0 (se sugieren con valor; su creación se solicita en Terraform).
 AMBIENTE = dict(CLI["ambiente_sufijo"])               # sufijo de recursos por bloque de variables.yaml
 RECURSOS = dict(CLI["recursos"])
-# Nombre del recurso distinto al código de sistema (decisión del cliente): solo cambia el VALOR ({s} y {sis} de RECURSOS y
-# el dataset raw por convención de las vars dbt); los nombres de llave, el source raw_<sis> y las carpetas no cambian.
-RECURSO_NOMBRE = dict(CLI["recurso_nombre"] or {})
+# Nombre DL 2.0 del sistema (decisión TL 20-nov): TODO lo emitido a out/<sis>/out/{artifacts,models} usa este nombre (carpetas,
+# archivos, source.system, labels, llaves de variables.yaml, buckets, dataset raw, modelos dbt, source raw_<nombre>). La
+# ENTRADA sigue por código: argumento CLI, out/<sis>/ e in/, DL 1.0, DDL y la lista de tablas.
+SISTEMA_NOMBRE = dict(CLI["sistema_nombre"] or {})
+# Nombres de recurso usados antes de v6.5 (solo para migrar VALORES de buckets/dataset con la convención vieja).
+NOMBRES_ANTERIORES = {k: tuple(v) for k, v in (CLI["nombres_anteriores"] or {}).items()}
+NOTA_RENOMBRE = "# renombrado (TL 20-nov): confirmar que el recurso existe"
 # CDC (bitácora de cambios): si los borrados de una corrida superan esta fracción de las filas vigentes, el modelo aborta.
 UMBRAL_BORRADO = float(CLI["umbral_borrado"])
 ESTRATEGIAS = {"snapshot": "snapshot", "completa": "snapshot", "full": "snapshot", "incremental": "incremental",
@@ -139,6 +151,168 @@ FALLBACK = {"extractor.job_namespace": "{K8S-NAMESPACE}", "extractor.env#source.
 # bloquean; con True (CLI aprobacion_total) solo `aprobado` pasa a LISTO.
 APROBACION_TOTAL = bool(CLI["aprobacion_total"])
 TEAM_REPORT = CLI["team_to_report"]        # label/campo team_to_report: configuración, ya no va en el CSV de tablas
+
+
+# ----------------------------------------------------------------------------- nombre DL 2.0 del sistema (v6.5)
+RAMA_PRD_DL2, RAMA_DEV_DL2, PROTEGIDAS, DBT_DIR = ENV_PRD, ENV_DEV, tuple(CLI["ramas_protegidas"]), DBT
+
+def _cambian():
+    """{código: nombre} solo de los sistemas cuyo nombre DL 2.0 difiere del código."""
+    return {c: n for c, n in SISTEMA_NOMBRE.items() if c and n and c != n}
+
+def nombre_sis(sis):
+    """Código de sistema (entrada) -> nombre DL 2.0 (todo lo que se emite a out/<sis>/out/{artifacts,models})."""
+    return SISTEMA_NOMBRE.get(sis, sis)
+
+def codigo_sis(x):
+    """Nombre DL 2.0 (admisiones) o código (admiprod) -> código de entrada. Otro valor se devuelve igual."""
+    for c, n in _cambian().items():
+        if str(x).lower() == n.lower():
+            return c
+    return x
+
+def _caso(orig, nuevo):
+    return nuevo.upper() if orig.isupper() else (nuevo[:1].upper() + nuevo[1:] if orig[:1].isupper() else nuevo)
+
+def renombrar(txt):
+    """Cambia el código de sistema anterior por su nombre DL 2.0 en un texto (palabra completa: no toca letras ni dígitos
+    pegados; `_`, `-`, `.` y `/` sí delimitan). Conserva mayúsculas: ADMIPROD_X -> ADMISIONES_X. Idempotente."""
+    if not isinstance(txt, str):
+        return txt
+    for c, n in _cambian().items():
+        txt = re.sub(rf"(?<![A-Za-z0-9]){re.escape(c)}(?![A-Za-z0-9])", lambda m, n=n: _caso(m.group(0), n), txt, flags=re.I)
+    return txt
+
+def nombres_viejos(sis):
+    return (sis,) + tuple(NOMBRES_ANTERIORES.get(sis, ()))
+
+def tipo_recurso(k, sis):
+    """Sufijo de RECURSOS (LND_BUCKET, RAW_BUCKET, RAW_DATASET) si la llave k es un recurso del sistema sis; si no, ''."""
+    S, K = sis.upper(), str(k).upper()
+    for suf in RECURSOS:
+        if K == f"{S}_{suf}":
+            return suf
+    return "RAW_DATASET" if K == f"RAW_{S}_DATASET" and "RAW_DATASET" in RECURSOS else ""
+
+def valor_recurso(suf, nom, amb):
+    return RECURSOS[suf].format(s=nom.replace("_", "-"), sis=nom, amb=amb)
+
+def convertir_recurso(clave, valor):
+    """Llave de recurso (nombre anterior) con valor de la convención vieja (código o nombre anterior) -> valor de la
+    convención nueva con el mismo ambiente; None si la llave no es de recurso o el valor no sigue la convención vieja."""
+    for sis, nuevo in _cambian().items():
+        suf = tipo_recurso(clave, sis)
+        if not suf:
+            continue
+        for amb in sorted(set(AMBIENTE.values())):
+            if any(str(valor) == valor_recurso(suf, v, amb) for v in nombres_viejos(sis)):
+                return valor_recurso(suf, nuevo, amb)
+    return None
+
+def envs_renombrados(envs):
+    """Vista de {ambiente: {llave: valor}} con las llaves renombradas (así quedan en la copia de out/). Si la llave nueva
+    ya existe en el bloque se deja la nueva y la vieja se conserva con su nombre (se reporta para retiro)."""
+    out = {}
+    for env, b in envs.items():
+        nb = {}
+        for k, v in b.items():
+            nk = renombrar(k)
+            if nk != k and nk in b:
+                nb[k] = v
+                continue
+            nv = convertir_recurso(k, str(v)) if nk != k and v not in (None, "") else None
+            nb[nk] = v if nv is None else nv
+        out[env] = nb
+    return out
+
+def _val_com(rest):
+    """Resto de una línea `llave:` -> (espacio inicial, comilla, valor, comentario con su espacio)."""
+    vp = strip_comment(rest)
+    cmt = rest[len(vp):]
+    lead = vp[:len(vp) - len(vp.lstrip())]
+    v = vp.strip()
+    if len(v) >= 2 and v[0] in "'\"" and v[-1] == v[0]:
+        return lead, v[0], (v[1:-1].replace("''", "'") if v[0] == "'" else v[1:-1]), cmt
+    return lead, "", v, cmt
+
+def _renombra_linea(l, k, nk, info):
+    m = re.match(r"^(\s*['\"]?)([\w.\-]+)(['\"]?\s*:)(.*)$", l)
+    pre, sep, rest = m.group(1), m.group(3), m.group(4)
+    lead, q, val, cmt = _val_com(rest)
+    nv = convertir_recurso(k, val) if val else None
+    info["llaves"].append((k, nk))
+    if nv is None:
+        if val and any(tipo_recurso(k, c) for c in _cambian()):
+            info["recursos_otro_valor"].append(nk)          # llave de recurso con valor fuera de la convención: se conserva
+        return pre + nk + sep + rest
+    info["recursos"].append(nk)
+    qq = q or "'"
+    tail = (cmt.rstrip() + " " + NOTA_RENOMBRE) if cmt.strip() else ("   " + NOTA_RENOMBRE)
+    return pre + nk + sep + lead + qq + (nv.replace("'", "''") if qq == "'" else nv) + qq + tail
+
+def renombrar_regiones(lines, regiones, info):
+    """Renombra EN SITIO (misma línea, mismo valor, mismo comentario) cada llave con el código anterior dentro de las
+    regiones [(ini, fin)] y el título de grupo `# <código>`. Llaves de recurso con valor de la convención vieja:
+    valor nuevo + nota. Si la llave nueva ya existe en la región se deja y la vieja se anota en info['viejas']."""
+    lines = list(lines)
+    cam = {c.lower() for c in _cambian()}
+    for ini, fin in regiones:
+        ya = {llave_de(l) for l in lines[ini:fin]} - {None}
+        titulos = {l.strip().lstrip("#").strip().lower() for l in lines[ini:fin] if l.lstrip().startswith("#")}
+        for j in range(ini, fin):
+            l = lines[j]
+            k = llave_de(l)
+            if k:
+                nk = renombrar(k)
+                if nk == k:
+                    continue
+                if nk in ya:
+                    info["viejas"].append(k)
+                    continue
+                lines[j] = _renombra_linea(l, k, nk, info)
+            elif l.lstrip().startswith("#"):
+                t = l.strip().lstrip("#").strip()
+                if t.lower() in cam and renombrar(t) != t and renombrar(t).lower() not in titulos:
+                    lines[j] = l.replace(t, renombrar(t), 1)
+                    info["titulos"] += 1
+    return lines
+
+def _equiv_renombre(o, n):
+    """¿La línea n es la línea o con solo un renombre permitido (llave, título o valor de recurso + nota)?"""
+    if o == n:
+        return True
+    ko, kn = llave_de(o), llave_de(n)
+    if ko and kn:
+        if ko == kn or renombrar(ko) != kn or o.split(ko, 1)[0] != n.split(kn, 1)[0]:
+            return False
+        ro, rn = o.split(ko, 1)[1], n.split(kn, 1)[1]
+        if ro == rn:
+            return True
+        l1, q1, v1, c1 = _val_com(ro.split(":", 1)[1])
+        l2, q2, v2, c2 = _val_com(rn.split(":", 1)[1])
+        nv = convertir_recurso(ko, v1)
+        return (nv is not None and v2 == nv and l1 == l2 and (q1 or "'") == q2
+                and c2 == ((c1.rstrip() + " " + NOTA_RENOMBRE) if c1.strip() else ("   " + NOTA_RENOMBRE)))
+    if o.lstrip().startswith("#") and n.lstrip().startswith("#"):
+        t = o.strip().lstrip("#").strip()
+        return t.lower() in {c.lower() for c in _cambian()} and n == o.replace(t, renombrar(t), 1)
+    return False
+
+def verificar_renombre(base, lines):
+    """Control del renombre en sitio: mismas líneas, en el mismo orden, y cada una igual o con un renombre permitido.
+    -> texto del problema o ''."""
+    if len(base) != len(lines):
+        return "cambió la cantidad de líneas"
+    mal = next((i for i, (o, n) in enumerate(zip(base, lines)) if not _equiv_renombre(o, n)), None)
+    return "" if mal is None else f"línea {mal + 1} alterada fuera de lo permitido"
+
+def info_renombre():
+    return {"llaves": [], "recursos": [], "recursos_otro_valor": [], "viejas": [], "titulos": 0, "residuales": [], "fuentes": []}
+
+def residuales(texto, donde):
+    """Líneas del texto que aún nombran el código anterior (tras el renombre): se reportan en ESTADO.md."""
+    rx = re.compile("|".join(rf"(?<![A-Za-z0-9]){re.escape(c)}(?![A-Za-z0-9])" for c in _cambian()), re.I) if _cambian() else None
+    return [f"{donde} línea {i}" for i, l in enumerate(texto.splitlines(), 1) if rx and rx.search(l)]
 
 
 # ----------------------------------------------------------------------------- utilidades
@@ -194,10 +368,14 @@ def env_blocks(artifacts, archivo=None):
             out.update({k: v for k, v in it.items() if isinstance(v, dict)})
     return out
 
+def envs_dl2(artifacts, archivo=None):
+    """Bloques de variables.yaml con las llaves del nombre DL 2.0 (vista renombrada; el archivo del repo no se toca)."""
+    return envs_renombrados(env_blocks(artifacts, archivo))
+
 def model_vars(models):
     v = dict(load_yaml(Path(models) / "dbt_project.yml").get("vars") or {})
     amb = v.pop("ambientes", {}) or {}
-    return set(v).union(*[set(b or {}) for b in amb.values()])
+    return {renombrar(k) for k in set(v).union(*[set(b or {}) for b in amb.values()])}
 
 def get(d, path, default=None):
     for k in path.split("."):
@@ -254,11 +432,11 @@ def flat_refs(doc, pre=""):
     return out
 
 def code(v):
-    """Etiqueta del Excel o código -> código DL 2.0."""
+    """Etiqueta del Excel o código -> código de sistema (entrada). El nombre DL 2.0 (admisiones) también se acepta."""
     v = (v or "").strip()
     if v in CATALOGO:
         return CATALOGO[v]
-    return v if re.fullmatch(r"[a-z0-9_]+", v) else (PEND if not v else norm(v))
+    return codigo_sis(v if re.fullmatch(r"[a-z0-9_]+", v) else (PEND if not v else norm(v)))
 
 def operacional(v):
     return (v or "").strip() or PEND
@@ -349,12 +527,29 @@ def fill(t, sis, name):
 class Lit(str):
     pass
 
+class QStr(str):
+    """Valor string que se emite SIEMPRE entre comillas (las llaves de los mapas quedan planas)."""
+
+def _rep_qstr(d, v):
+    doble = "'" in v or any(ch in v for ch in "\n\r\t\x85\u2028\u2029") or any(not ch.isprintable() for ch in v)
+    return d.represent_scalar("tag:yaml.org,2002:str", str(v), style='"' if doble else "'")
+
 yaml.add_representer(Lit, lambda d, s: d.represent_scalar("tag:yaml.org,2002:str", s, style="|"), Dumper=yaml.SafeDumper)
+yaml.add_representer(QStr, _rep_qstr, Dumper=yaml.SafeDumper)
 yaml.add_representer(str, lambda d, v: d.represent_scalar(
     "tag:yaml.org,2002:str", v, style="'" if re.fullmatch(r"[0-9][0-9_.:]*", v) else None), Dumper=yaml.SafeDumper)
 
+def citar(x):
+    """Envuelve en QStr todo valor str (mapas y listas, a cualquier profundidad); las llaves, int, bool, None y los
+    bloques literales (Lit) quedan como están."""
+    if isinstance(x, dict):
+        return {k: citar(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [citar(v) for v in x]
+    return QStr(x) if type(x) is str else x
+
 def dump(d):
-    out = yaml.safe_dump(d, sort_keys=False, allow_unicode=True, width=4096)
+    out = yaml.safe_dump(citar(d), sort_keys=False, allow_unicode=True, width=4096)
     return re.sub(r"'\{\{ var\(''([A-Z0-9_]+)''\) \}\}'", lambda m: '"{{ var(\'%s\') }}"' % m.group(1), out)
 
 def tiene_marca(path):
@@ -660,7 +855,7 @@ def index_dl2(artifacts, envs):
         doc = load_refyaml(text)
         frm = re.search(r"FROM\s+\{([A-Z0-9_]+)\}\.([A-Z0-9_$#]+)", text, re.I)
         owner = frm.group(1) if frm else ""
-        vals = [str(v.get(owner, "")) for v in envs.values()] if owner else []
+        vals = [str(v.get(owner) or v.get(renombrar(owner), "")) for v in envs.values()] if owner else []
         js = next(iter(sorted(y.parent.glob("*.json"))), None)
         refs = flat_refs(doc)
         if owner:
@@ -694,9 +889,10 @@ def convencion(infos):
 
 def refs_base(sis, name, caso, hit, infos, conv):
     """Referencias por ruta: convención < tabla hermana del mismo sistema < archivo existente (B: sin conexión)."""
+    sis, name = nombre_sis(codigo_sis(sis)), renombrar(name)      # lo emitido usa el nombre DL 2.0
     out = {p: fill(v, sis, name) for p, v in conv.items()}
     src = {p: "convención" for p in out}
-    sib = next((i for i in infos if i["sistema"] == sis and not i["lee_ods"] and i is not hit), None)
+    sib = next((i for i in infos if codigo_sis(i["sistema"]) == codigo_sis(sis) and not i["lee_ods"] and i is not hit), None)
     if sib:
         sname = f"{sib['sistema']}_{sib['tabla']}"
         for p, v in sib["refs"].items():
@@ -704,7 +900,7 @@ def refs_base(sis, name, caso, hit, infos, conv):
     if hit:
         for p, v in hit["refs"].items():
             if not (caso == "B" and p in CONN):
-                out[p], src[p] = v, "existente"
+                out[p], src[p] = renombrar(v), "existente"
     return out, src
 
 def split_cols(texto):
@@ -781,7 +977,7 @@ def resolver(row, envs, idx, infos, conv):
     m = STG.match(nombre)
     base = m.group(2) if m else nombre
     hit = idx.get(nombre.upper()) or idx.get(base.upper())
-    sistema = hit["sistema"] if hit else code(row["sistema_origen"])
+    sistema = codigo_sis(hit["sistema"]) if hit else code(row["sistema_origen"])
     tabla = hit["tabla"] if hit else norm(re.sub(rf"^{re.escape(sistema)}_", "", base, flags=re.I))
     return nombre, m, base, hit, sistema, tabla
 
@@ -799,7 +995,7 @@ def repos(a):
     a.tablas = t if t.exists() or t.parent != Path(".") else IN / t.name   # nombre suelto -> in/
 
 def contexto(a):
-    envs = env_blocks(a.artifacts)
+    envs = envs_dl2(a.artifacts)
     idx, infos = index_dl2(a.artifacts, envs)
     return envs, idx, infos, convencion(infos), load_catalogo(a.catalogo)
 
@@ -938,6 +1134,9 @@ def leer_tablas(tpath):
             r.update({k: str(sc.get(k) or "") for k in ESTADO_CAMPOS})
             r["sistema"] = r["sistema"] or (maestra if key else "")
             r["tabla"] = key.removeprefix(f"{r['sistema']}_") if r["sistema"] else key
+        for campo in CAMPOS_LLAVE:                           # llaves de conexión con el código anterior -> nombre DL 2.0
+            if r.get(campo):
+                r[campo] = renombrar(r[campo])
         filas.append(r)
     for x in avisos:
         print(f"  aviso (migración tablas.csv): {x}")
@@ -1030,8 +1229,8 @@ def cmd_scan(a):
         caso = ("B" if lee_ods else "A") if hit else ("C" if hits1 or origen_v1 else "D")
         auto = {
             "caso": caso, "sistema": sistema, "tabla": tabla,
-            "raw_table": (hit or {}).get("raw_table") or tabla,
-            "dbt_model": "|".join((hit or {}).get("dbt_models") or [f"{sistema}_{tabla}_hist"]),
+            "raw_table": renombrar((hit or {}).get("raw_table") or tabla),
+            "dbt_model": "|".join(renombrar(m_) for m_ in ((hit or {}).get("dbt_models") or [f"{nombre_sis(sistema)}_{tabla}_hist"])),
             "tecnologia": TECH.get(m.group(1).lower()) if m else src1.get("tecnologia", ""),
             "tabla_fuente": origen_v1[0]["tabla"] if origen_v1 and origen_v1[0]["tabla"]
                             else re.sub(rf"^{re.escape(sistema)}_", "", base, flags=re.I).upper(),
@@ -1294,7 +1493,7 @@ def yaml_from_template(path, variant):
 
 # ----------------------------------------------------------------------------- render
 def marca_txt(t, prefijo):
-    return f"{prefijo} {MARCA}: {GEN} | {t['ticket']} | {date.today().isoformat()} | {t['tabla_origen']}\n"
+    return f"{prefijo} {MARCA}: {GEN} | {t['ticket']} | {date.today().isoformat()} | {renombrar(t['tabla_origen'])}\n"
 
 BU, IND = CLI["bu"], CLI["ind"]     # labels bu (unidad de negocio) e ind; aplican a modelo .sql y JSON
 
@@ -1354,7 +1553,7 @@ def _sql_partes(t, cols, pii, dyn=None, est="snapshot"):
     sel = ",\n".join(f"    {cast.get(c['tipo_std'], '{c}').format(c=c['columna'])} AS {c['columna'].lower()}" for c in cols)
     labels = {"env": None, "country": "co", "layer": "std", "bu": BU, "ind": IND, "comp-id": CLI["comp_id"],
               "scope": "datalake", "workload-type": "ingest", "engine": "batch", "domain": t.get("dominio_label") or t["dominio"],
-              "subdomain": t["subdominio"], "source_system": t["sistema"], "update_type": "incremental" if est in ("incremental", "cdc_hash") else "completa",
+              "subdomain": t["subdominio"], "source_system": nombre_sis(t["sistema"]), "update_type": "incremental" if est in ("incremental", "cdc_hash") else "completa",
               "load_strategy": est, "update_frequency": t["periodicidad"], "available_time": t["available_time"], "pii": pii,
               "permanence": t["permanence"], "team_to_report_dev": FIJOS["team_to_report_dev"], MARCA: GEN}
     for k, expr in (dyn or {}).items():                 # labels por ambiente según el repo (scope, env…)
@@ -1378,7 +1577,7 @@ def model_sql(t, cols, pii, dyn=None):
         '    DATE({{ var("extraction_date") }}) AS extraction_date,\n'
         "    CURRENT_DATETIME('America/Bogota') AS execution_dttm,\n"
         '    {{ var("source") }} AS source\n'
-        f"  FROM {{{{ source('raw_{t['sistema']}', '{t['raw_table']}') }}}}\n)\n\n"
+        f"  FROM {{{{ source('raw_{nombre_sis(t['sistema'])}', '{t['raw_table']}') }}}}\n)\n\n"
         f"SELECT * FROM {m}\n{{% if is_incremental() %}}\n"
         "WHERE information_date IN ({{ partitions_to_replace | join(',') }})\n{% endif %}\n")
 
@@ -1465,11 +1664,11 @@ def model_sql_cdc(t, cols, pii, dyn, ef):
     (SYSDATE…) ni, en incremental, la columna_control: así una fila solo cambia si cambió su contenido."""
     sel, lab = _sql_partes(t, cols, pii, dyn, ef["est"])
     pk, cdc = ", ".join(ef["pk"]), ef["est"] == "cdc_hash"
-    qualify = (f"  QUALIFY ROW_NUMBER() OVER (PARTITION BY {pk} ORDER BY {ef['control'].lower()} DESC) = 1\n"
+    qualify = (f"  WHERE TRUE\n  QUALIFY ROW_NUMBER() OVER (PARTITION BY {pk} ORDER BY {ef['control'].lower()} DESC) = 1\n"
                if ef["est"] == "incremental" else "")
     borrados = BORRADOS_CDC.replace("@@COLS@@", ", ".join(f"e.{c['columna'].lower()}" for c in cols)) if cdc else ""
     rep = {"@@MARCA@@": marca_txt(t, "--"), "@@CLUSTER@@": ", ".join(f"'{c}'" for c in ef["pk"][:4]), "@@LAB@@": lab,
-           "@@SEL@@": sel, "@@SIS@@": t["sistema"], "@@RAW@@": t["raw_table"], "@@QUALIFY@@": qualify,
+           "@@SEL@@": sel, "@@SIS@@": nombre_sis(t["sistema"]), "@@RAW@@": t["raw_table"], "@@QUALIFY@@": qualify,
            "@@HASH@@": ", ".join(ef["hashcols"]), "@@BORRADOS@@": borrados,
            "@@CONTROL@@": CONTROL_CDC if cdc else "\n",
            "@@GUARDA@@": GUARDA_CDC.replace("@@UMBRAL@@", str(UMBRAL_BORRADO)) if cdc else ""}
@@ -1510,17 +1709,17 @@ def model_schema(t, cols, ef=None):
         prueba = lambda cols_: [{"dbt_utils.unique_combination_of_columns": {"combination_of_columns": cols_}}]
         return marca_txt(t, "#") + dump({"version": 2, "models": [
             {"name": ef["hist"], "meta": {MARCA: GEN},
-             "description": f"Bitácora de cambios ({ef['est']}) de {t['sistema']}.{t['tabla']} (origen {t['tabla_fuente']}): "
+             "description": f"Bitácora de cambios ({ef['est']}) de {nombre_sis(t['sistema'])}.{t['tabla']} (origen {t['tabla_fuente']}): "
                             "una fila por cambio detectado (op = I, U o D) en cada information_date.",
              "data_tests": prueba(llave + ["information_date"]), "columns": cc + [rh, op] + meta},
             {"name": ef["current"], "meta": {MARCA: GEN},
-             "description": f"Estado actual de {t['sistema']}.{t['tabla']} (última versión vigente por llave, "
+             "description": f"Estado actual de {nombre_sis(t['sistema'])}.{t['tabla']} (última versión vigente por llave, "
                             f"desde la bitácora {ef['hist']}).",
              "data_tests": prueba(llave), "columns": cc + [rh] + meta}]})
     cc += meta
     return marca_txt(t, "#") + dump({"version": 2, "models": [{
         "name": t["dbt_model"].split("|")[0],
-        "description": f"Histórico diario de {t['sistema']}.{t['tabla']} (origen {t['tabla_fuente']}).",
+        "description": f"Histórico diario de {nombre_sis(t['sistema'])}.{t['tabla']} (origen {t['tabla_fuente']}).",
         "meta": {MARCA: GEN},
         "data_tests": [{"dbt_utils.unique_combination_of_columns": {
             "combination_of_columns": llave,
@@ -1595,20 +1794,20 @@ def usa_fecha_informacion(artifacts):
 
 def render_table(t, cols, a, out, ctx, rep, usos):
     envs, idx, infos, conv, cat = ctx
-    sis, tab = t["sistema"], t["tabla"]
+    sis, tab = nombre_sis(t["sistema"]), t["tabla"]            # sis = nombre DL 2.0 (todo lo emitido); t["sistema"] = código
     name = f"{sis}_{tab}"
     cipher = t["extractor"] == "cipher"
     tpl = Path(a.artifacts) / "ci/checks/templates"
     y = yaml_from_template(tpl / "ingesta.yaml", "CIFRADO" if cipher else "JDBC")
     _, _, _, hit, _, _ = resolver(t, envs, idx, infos, conv)
-    refs, _ = refs_base(sis, name, t["caso"], hit, infos, conv)
+    refs, _ = refs_base(t["sistema"], name, t["caso"], hit, infos, conv)
     for p, v in refs.items():                      # referencias de ambiente: existente > hermano > convención
         if p != "@owner" and p not in CONN and exists_ref(y, p):
             put_ref(y, p, v)
     names = [c["columna"] for c in cols]
     sel = [f"{c['expresion']} AS {c['columna']}" if c.get("expresion") else c["columna"] for c in cols]
     query = Lit("SELECT\n    " + ",\n    ".join(sel) + f"\nFROM {ref(t['owner_db'])}.{t['tabla_fuente']}\n")
-    ef = t.get("_ef") or estrategia_efectiva(t, cols, sis)
+    ef = t.get("_ef") or estrategia_efectiva(t, cols, t["sistema"])
     extra, pend_t = t.setdefault("_extra", []), t.setdefault("_pend", [])
     m0 = t["dbt_model"].split("|")[0]
     cdc = ef["est"] != "snapshot"
@@ -1682,6 +1881,7 @@ def render_table(t, cols, a, out, ctx, rep, usos):
     js["labels"] = {k: label_safe(v) for k, v in js["labels"].items()}   # BigQuery rechaza @, . y mayúsculas
     js["schema"] = [{"name": c["columna"], "type": "STRING", "description": c["descripcion"],
                      "policy_tag": f"<{c['policy_tag']}>"} for c in cols]
+    t["_yaml"] = y                                   # dict renderizado: base de la prueba de conexión (v6.6)
     ytxt = marca_txt(t, "#") + dump(y)
     jtxt = json.dumps(js, ensure_ascii=False, indent=2) + "\n"
     art = out / "artifacts/co/data_source" / sis / tab
@@ -1932,7 +2132,7 @@ def paso_conexiones(a, maestra, envs):
             existente = next((k for env in sorted(envs, reverse=True) for k, v in envs[env].items()
                               if ok(k) and por_env.get(env) and coincide_dl1(campo, por_env[env], v, cipher, envs[env], k)), "")
             nombre_llave = r[campo] if manual else (existente or (r[campo] if filled(r[campo]) and ok(r[campo])
-                                                                  else patron.format(S=sis.upper())))
+                                                                  else patron.format(S=nombre_sis(sis).upper())))
             if not manual:
                 r[campo] = nombre_llave
                 fuentes.append(f"{campo}={'dl2-existente' if existente else ('dl1-nueva' if ref_c else 'convención')}")
@@ -1980,13 +2180,14 @@ def paso_render(a, maestra, propuestas, estado_conn):
     envs = ctx[0]
     mvars = model_vars(a.models)
     a.maestra, a.solo_textos = maestra, True
+    a.ren, nom_sis = info_renombre(), nombre_sis(maestra)           # nom_sis: nombre DL 2.0 de lo emitido
     tablas = leer_tablas(R["tablas"])
     por_tabla = defaultdict(list)
     for c in read_csv(R["columnas"]):
         por_tabla[c["tabla"]].append(c)
     out_root = R["out"]
     editados, previo_vars, previo_dbt = leer_ediciones(out_root)   # antes de borrar out/
-    for sub in ("artifacts", "models", "listo", "borrador"):
+    for sub in ("artifacts", "models", "listo", "borrador", "prueba_conexion"):
         shutil.rmtree(out_root / sub, ignore_errors=True)
     for env, bloque in previo_vars.items():           # valores escritos a mano en out/.../variables.yaml
         for k, v in bloque.items():
@@ -1994,6 +2195,7 @@ def paso_render(a, maestra, propuestas, estado_conn):
                 propuestas[env][k] = (str(v), "valor manual (out/variables.yaml)")
     manifiesto, conservados = {}, []
     usos_tot, resumen, fuentes = defaultdict(set), [], defaultdict(list)
+    base_prueba = None                                # (tabla, dict YAML) de la primera tabla con YAML (v6.6)
     for t in tablas:
         t = {k: (t.get(k) or d) for k, _, d in FILA}
         t["update_type"] = "completa"                                   # derivado de la estrategia efectiva (render_table)
@@ -2003,7 +2205,7 @@ def paso_render(a, maestra, propuestas, estado_conn):
         pend_dom = resolver_dominio(t, a.models)                 # antes de render: fija carpeta y labels
         key = f"{t['sistema']}_{t['tabla']}"
         if t["caso"] == "D":
-            resumen.append({"tabla": key, "estado": "SIN FUENTE", "pend": ["no existe en DL 1.0 ni DL 2.0: escalar"],
+            resumen.append({"tabla": key, "nom": renombrar(key), "estado": "SIN FUENTE", "pend": ["no existe en DL 1.0 ni DL 2.0: escalar"],
                             "archivos": []})
             continue
         cols = [c for c in sorted(por_tabla.get(key, []), key=lambda x: int(x.get("orden") or 0))
@@ -2011,6 +2213,8 @@ def paso_render(a, maestra, propuestas, estado_conn):
         rep_t, usos_t = [], defaultdict(set)
         t["_ef"], t["_extra"], t["_pend"] = estrategia_efectiva(t, cols, maestra), [], []
         files = render_table(t, cols, a, out_root, ctx, rep_t, usos_t) if cols else []
+        if cols and base_prueba is None:
+            base_prueba = (t, t["_yaml"])
         files, cons = aplicar_ediciones(files, out_root, editados, manifiesto)
         conservados += cons
         pend = []
@@ -2054,24 +2258,24 @@ def paso_render(a, maestra, propuestas, estado_conn):
             pend.append("quedan valores POR_CONFIRMAR en los archivos")
         nuevo_modelo = any("__sources" in x for x in rep_t)
         if nuevo_modelo:
-            fuentes[(t["dominio"], t["sistema"])].append(t["raw_table"])
+            fuentes[(t["dominio"], nombre_sis(t["sistema"]))].append(t["raw_table"])
         for fp, txt in files:
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(txt, encoding="utf-8", newline="\n")
         for k, v in usos_t.items():
             usos_tot[k] |= v
-        resumen.append({"tabla": key, "estado": "BORRADOR" if pend else "LISTO", "pend": pend,
+        resumen.append({"tabla": key, "nom": renombrar(key), "estado": "BORRADOR" if pend else "LISTO", "pend": pend,
                         "dl1": estado_conn.get(key, {}).get("dl1", "-"),
                         "archivos": [fp.relative_to(out_root).as_posix() for fp, _ in files],
                         "usos": sorted(set(usos_t) - {PEND}),
-                        "fuente": (t["dominio"], t["sistema"], t["raw_table"]) if nuevo_modelo else None,
+                        "fuente": (t["dominio"], nombre_sis(t["sistema"]), t["raw_table"]) if nuevo_modelo else None,
                         "carga": (t["_ef"], t.get("estrategia_sugerida", ""), t.get("ventana_dias") or "3"),
                         "extra": [f"extractor: {t['extractor']} · {fx}"] + estado_conn.get(key, {}).get("info", [])
                                  + t["_extra"]
                                  + [x.strip(" -") for x in rep_t if "modelo existente" in x]
                                  + ([f"info: {cob}"] if NUEVA in cob else [])})
     usos_tot.pop(PEND, None)
-    sis_up = maestra.upper()
+    sis_up = nom_sis.upper()
     for env, bloque in envs.items():                              # llaves usadas que faltan (policy tags, etc.)
         for k in sorted(usos_tot):
             if k in bloque or k in propuestas[env]:
@@ -2080,12 +2284,11 @@ def paso_render(a, maestra, propuestas, estado_conn):
             if k == EMAIL_KEY:
                 propuestas[env][k] = ("", f"PENDIENTE valor {env}: correo del canal o grupo de alertas (dato sensible)")
             elif rec and env in AMBIENTE:
-                nom = RECURSO_NOMBRE.get(maestra, maestra)       # nombre del recurso (puede diferir del código)
-                propuestas[env][k] = (rec.format(s=nom.replace("_", "-"), sis=nom, amb=AMBIENTE[env]),
+                propuestas[env][k] = (rec.format(s=nom_sis.replace("_", "-"), sis=nom_sis, amb=AMBIENTE[env]),
                                       "sugerido por convención DL 2.0: crear en Terraform")
             else:
                 propuestas[env][k] = ("", f"PENDIENTE valor {env}" + (" (policy tag)" if "policy_tag" in usos_tot[k] else ""))
-    notas_src = escribir_fuentes(a, out_root, fuentes)
+    notas_src = escribir_fuentes(a, out_root, fuentes, a.ren)
     for f in (out_root / "models").rglob("__sources.yml"):   # __sources.yml editado a mano: se conserva
         orig = Path(a.models) / f.relative_to(out_root / "models")
         eol = leer_texto(orig, a.models)[1] if orig.exists() else "\n"           # fin de línea del archivo del repo
@@ -2096,14 +2299,14 @@ def paso_render(a, maestra, propuestas, estado_conn):
         if r.get("fuente") and any(f"std_{r['fuente'][0]}/" in n and "a mano" in n for n in notas_src):
             r["pend"].append(f"declarar raw_{r['fuente'][1]} en std_{r['fuente'][0]}/__sources.yml")
             r["estado"] = "BORRADOR"
-    notas_src += escribir_variables(a, out_root, propuestas, maestra)
+    notas_src += escribir_variables(a, out_root, propuestas, nom_sis, list(envs))
     pt_dbt = sorted(k for k, v in usos_tot.items() if "policy_tag" in v and mvars and k not in mvars)
-    dbt_nuevas = vars_dbt_faltantes(a, out_root, maestra, mvars, envs)
+    dbt_nuevas = vars_dbt_faltantes(a, out_root, nom_sis, mvars, envs)
     for k, d in dbt_nuevas.items():                   # valores escritos a mano en out/models/dbt_project.yml
         for e in ("dev", "prd"):
             if not d[e] and previo_dbt.get(e, {}).get(k):
                 d[e], d["origen"] = str(previo_dbt[e][k]), "valor manual (out/dbt_project.yml)"
-    notas_src += escribir_dbt_vars(a, out_root, dbt_nuevas, maestra)
+    notas_src += escribir_dbt_vars(a, out_root, dbt_nuevas, nom_sis, a.ren)
     con_valor = lambda k, e: envs.get(e, {}).get(k) not in (None, "") or bool(propuestas[e].get(k, ("", ""))[0])
     dbt_vacias = {k for k, d in dbt_nuevas.items() if not (d["dev"] and d["prd"])}
     for r in resumen:                                 # llaves y vars sin valor en los archivos finales de out/
@@ -2125,8 +2328,10 @@ def paso_render(a, maestra, propuestas, estado_conn):
         f["estado"] = est_t.get(f"{f['sistema']}_{f['tabla']}", f.get("estado", ""))
     escribir_tablas(R["tablas"], filas)
     escribir_copia(a, maestra, out_root, resumen)
+    escribir_retiro(a, maestra, out_root, resumen)
+    a.prueba = escribir_prueba(a, maestra, out_root, base_prueba, resumen)
     (out_root / ".generado.json").write_text(json.dumps(manifiesto, indent=0, sort_keys=True), encoding="utf-8")
-    escribir_estado(maestra, R, resumen, propuestas, envs, notas_src, pt_dbt, dbt_nuevas, sorted(set(conservados)))
+    escribir_estado(maestra, R, resumen, propuestas, envs, notas_src, pt_dbt, dbt_nuevas, sorted(set(conservados)), a.ren, a.prueba)
     return resumen
 
 
@@ -2146,17 +2351,17 @@ def leer_ediciones(out_root):
         f = out_root / rel
         if f.exists():
             txt = f.read_text(encoding="utf-8")
-            if sha(txt) != h:
-                editados[rel] = txt
+            if sha(txt) != h:                       # corrida anterior con el nombre viejo: ruta y contenido pasan al nombre DL 2.0
+                editados[renombrar(rel)] = renombrar(txt) if renombrar(rel) != rel else txt
     var = out_root / "artifacts/co/variables.yaml"
-    previo_vars = env_blocks(None, var) if var.exists() else {}
+    previo_vars = envs_dl2(None, var) if var.exists() else {}
     dbt = out_root / "models/dbt_project.yml"
     previo_dbt = {}
     if dbt.exists():
         v = load_yaml(dbt).get("vars") or {}
         amb = v.pop("ambientes", {}) or {}
-        previo_dbt = {e: {**{k: x for k, x in v.items() if x}, **{k: x for k, x in (amb.get(e) or {}).items() if x}}
-                      for e in ("dev", "prd")}
+        previo_dbt = {e: {**{renombrar(k): x for k, x in v.items() if x},
+                          **{renombrar(k): x for k, x in (amb.get(e) or {}).items() if x}} for e in ("dev", "prd")}
     return editados, previo_vars, previo_dbt
 
 
@@ -2246,7 +2451,27 @@ def verificar_fusion(base, lines, regiones_base, regiones_nuevo):
     return ""
 
 
-def fusionar_variables(texto, propuestas, solo_con_valor=False, titulo="", ordenado=True):
+def renombrar_variables(texto, envs, info):
+    """variables.yaml: renombre en sitio de las llaves con el código anterior (ver renombrar_regiones), por bloque de
+    ambiente. Si el control del renombre falla se deja el texto sin renombrar y se avisa. -> (texto, notas)."""
+    if not _cambian():
+        return texto, []
+    base = texto.splitlines()
+    regs = [(b[0] + 1, b[1]) for b in (bloque_env(base, e) for e in envs) if b]
+    tmp = info_renombre()
+    lines = renombrar_regiones(base, regs, tmp)
+    mal = verificar_renombre(base, lines)
+    if mal:
+        return texto, [f"variables.yaml: el renombre en sitio falló ({mal}); se dejó sin renombrar"]
+    for k in ("llaves", "recursos", "recursos_otro_valor", "viejas"):
+        info[k] += tmp[k]
+    info["titulos"] += tmp["titulos"]
+    out = "\n".join(lines) + ("\n" if texto.endswith("\n") else "")
+    info["residuales"] += residuales(out, "variables.yaml")
+    return out, []
+
+
+def fusionar_variables(texto, propuestas, solo_con_valor=False, titulo="", ordenado=True, info=None, envs_ren=None):
     """Agrega a cada bloque de ambiente las llaves que faltan sin reformatear el archivo ni tocar valores existentes.
     - Ubicación (ordenado): por sistema o por tipo según cómo esté organizado el bloque (ubicar_llaves); igual en
       todos los ambientes. Si el control posterior falla, se usa el grupo `# <titulo>` al final y se deja una nota.
@@ -2254,7 +2479,10 @@ def fusionar_variables(texto, propuestas, solo_con_valor=False, titulo="", orden
       vacía con `# PENDIENTE valor <env>`.
     - Una llave que ya existe vacía se completa si hay valor (no se pisa ningún valor existente)."""
     q = lambda v: "'" + str(v).replace("'", "''") + "'"
-    lines, notas = texto.splitlines(), []
+    notas = []
+    if info is not None:
+        texto, notas = renombrar_variables(texto, list(envs_ren or propuestas), info)
+    lines = texto.splitlines()
     con_valor = {k for p in propuestas.values() for k, (v, _) in p.items() if v}
     todas = {k for p in propuestas.values() for k in p}
     elegidas = con_valor if solo_con_valor else todas
@@ -2294,42 +2522,76 @@ def fusionar_variables(texto, propuestas, solo_con_valor=False, titulo="", orden
             return [(b[0] + 1, b[1]) for b in (bloque_env(ls, e) for e in propuestas) if b]
         mal = verificar_fusion(base, lines, regiones(base), regiones(lines))
         if mal:
-            res, n2 = fusionar_variables(texto, propuestas, solo_con_valor, titulo, ordenado=False)
+            res, n2 = fusionar_variables(texto, propuestas, solo_con_valor, titulo, ordenado=False)   # texto ya renombrado
             return res, n2 + [f"variables.yaml: la ubicación ordenada falló ({mal}); se usó el grupo `# {titulo}` "
                               "al final de cada bloque"]
     return "\n".join(lines) + "\n", notas
 
-def escribir_variables(a, out_root, propuestas, titulo=""):
+def escribir_variables(a, out_root, propuestas, titulo="", envs=None):
     src = Path(a.artifacts) / "co/variables.yaml"
-    if not src.exists() or not any(propuestas.values()):
+    if not src.exists():
         return []
     texto, eol = leer_texto(src, a.artifacts)
-    txt, notas = fusionar_variables(texto, propuestas, titulo=titulo)
+    ren = getattr(a, "ren", None) or info_renombre()
+    txt, notas = fusionar_variables(texto, propuestas, titulo=titulo, info=ren, envs_ren=envs)
+    if not any(propuestas.values()) and txt.rstrip("\n") == texto.rstrip("\n"):
+        return notas                                # nada que agregar ni renombrar: no hay copia que escribir
     dst = out_root / "artifacts/co/variables.yaml"
     dst.parent.mkdir(parents=True, exist_ok=True)
     escribir_texto(dst, txt, eol)
     return notas
 
 
-def fusionar_fuentes(texto, sis, tablas, plantilla=""):
-    """Agrega tablas al source raw_<sis> de __sources.yml (texto). Si el source no existe, clona el primer bloque
-    del archivo (o de `plantilla`) cambiando el sistema. Devuelve (texto, nota)."""
+ITEM_FUENTE = re.compile(r"^(\s*)-\s+name:\s*['\"]?([\w\-]+)['\"]?\s*$")
+
+
+def bloques_fuentes(ls):
+    """[[inicio, fin, nombre]] de los sources de __sources.yml (líneas)."""
+    out, top = [], None
+    for i, l in enumerate(ls):
+        m = ITEM_FUENTE.match(l)
+        if m and (top is None or len(m.group(1)) == top):
+            top = len(m.group(1))
+            out.append([i, len(ls), m.group(2)])
+        elif out and l.strip() and not l.lstrip().startswith("#") and len(l) - len(l.lstrip()) <= top \
+                and not ITEM_FUENTE.match(l):
+            out[-1][1] = min(out[-1][1], i)
+            break
+    for k in range(len(out) - 1):
+        out[k][1] = out[k + 1][0]
+    return out
+
+
+def renombrar_fuentes(texto, info=None):
+    """__sources.yml: renombra EN SITIO el source raw_<código anterior> (nombre, var del dataset y tablas del bloque) a
+    raw_<nombre DL 2.0>. Si el source nuevo ya existe se deja y el viejo se reporta. -> texto."""
+    if not _cambian() or not texto.strip():
+        return texto
+    lines = texto.splitlines()
+    bs = bloques_fuentes(lines)
+    nombres = {b[2] for b in bs}
+    cam = {f"raw_{c}": f"raw_{n}" for c, n in _cambian().items()}
+    for i0, f0, nom in bs:
+        if nom.lower() in cam and cam[nom.lower()] not in nombres:
+            for j in range(i0, f0):
+                lines[j] = renombrar(lines[j])
+            if info is not None:
+                info["fuentes"].append((nom, cam[nom.lower()]))
+        elif nom.lower() in cam and info is not None:
+            info["viejas"].append(nom)
+    out = "\n".join(lines) + "\n"
+    if info is not None:
+        info["residuales"] += residuales(out, "__sources.yml")
+    return out
+
+
+def fusionar_fuentes(texto, sis, tablas, plantilla="", info=None):
+    """Agrega tablas al source raw_<sis> de __sources.yml (texto; sis = nombre DL 2.0). Si el source anterior
+    raw_<código> existe se renombra en sitio. Si el source no existe, clona el primer bloque del archivo (o de
+    `plantilla`) cambiando el sistema. Devuelve (texto, nota)."""
+    texto = renombrar_fuentes(texto, info)
     lines = texto.splitlines() if texto.strip() else []
-    item = re.compile(r"^(\s*)-\s+name:\s*['\"]?([\w\-]+)['\"]?\s*$")
-    def bloques(ls):
-        out, top = [], None
-        for i, l in enumerate(ls):
-            m = item.match(l)
-            if m and (top is None or len(m.group(1)) == top):
-                top = len(m.group(1))
-                out.append([i, len(ls), m.group(2)])
-            elif out and l.strip() and not l.lstrip().startswith("#") and len(l) - len(l.lstrip()) <= top \
-                    and not item.match(l):
-                out[-1][1] = min(out[-1][1], i)
-                break
-        for k in range(len(out) - 1):
-            out[k][1] = out[k + 1][0]
-        return out
+    item, bloques = ITEM_FUENTE, bloques_fuentes
     def agregar(ls, ini, fin, nombres):
         ti = next((j for j in range(ini, fin) if re.match(r"^\s*tables:\s*$", ls[j])), None)
         if ti is None:
@@ -2341,7 +2603,7 @@ def fusionar_fuentes(texto, sis, tablas, plantilla=""):
         fin2 = fin
         while fin2 > ti + 1 and not ls[fin2 - 1].strip():
             fin2 -= 1
-        ls[fin2:fin2] = [f"{' ' * kin}- name: {n}" for n in nombres if n not in ya]
+        ls[fin2:fin2] = [f"{' ' * kin}- name: '{n}'" for n in nombres if n not in ya]
         return ls, ""
     bs = [b for b in bloques(lines) if b[2] == f"raw_{sis}"] if lines else []
     if bs:
@@ -2354,6 +2616,7 @@ def fusionar_fuentes(texto, sis, tablas, plantilla=""):
     i0, f0, nom = bp[0]
     viejo = nom.removeprefix("raw_")
     blk = [re.sub(re.escape(viejo), sis, re.sub(re.escape(viejo.upper()), sis.upper(), l)) for l in base[i0:f0]]
+    blk[0] = re.sub(r"(name:\s*)(['\"]?)(raw_[\w\-]+)\2\s*$", lambda m: f"{m.group(1)}'{m.group(3)}'", blk[0])
     ti = next((j for j, l in enumerate(blk) if re.match(r"^\s*tables:\s*$", l)), None)
     if ti is not None:
         tind = len(blk[ti]) - len(blk[ti].lstrip())
@@ -2392,7 +2655,7 @@ def vars_dbt_faltantes(a, out_root, sis, mvars, envs):
         if any(vals.values()):
             origen = "desde artifacts co/variables.yaml"
         elif "DATASET" in k.upper():
-            vals, origen = {e: f"raw_{RECURSO_NOMBRE.get(sis, sis)}" for e in vals}, "dataset raw por convención"
+            vals, origen = {e: f"raw_{sis}" for e in vals}, "dataset raw por convención"
         else:
             origen = "sin valor en artifacts: definir"
         out[k] = {**vals, "origen": origen}
@@ -2604,6 +2867,24 @@ def regiones_dbt(lines):
     return regs
 
 
+def renombrar_dbt(texto, info):
+    """dbt_project.yml: renombre en sitio de las vars (comunes y vars.ambientes.*) con el código anterior. Mismo control
+    que variables.yaml. -> (texto, notas)."""
+    if not _cambian():
+        return texto, []
+    base = texto.splitlines()
+    tmp = info_renombre()
+    lines = renombrar_regiones(base, regiones_dbt(base), tmp)
+    mal = verificar_renombre(base, lines)
+    if mal:
+        return texto, [f"dbt_project.yml: el renombre en sitio falló ({mal}); se dejó sin renombrar"]
+    for k in ("llaves", "recursos", "recursos_otro_valor", "viejas"):
+        info["dbt_" + k] = info.get("dbt_" + k, []) + tmp[k]
+    out = "\n".join(lines) + ("\n" if texto.endswith("\n") else "")
+    info["residuales"] += residuales(out, "dbt_project.yml")
+    return out, []
+
+
 def fusionar_dbt(texto, faltan, titulo, solo_con_valor=False, ordenado=True):
     """Agrega a dbt_project.yml las vars que faltan, sin reformatear: mismo valor en dev y prd -> vars comunes;
     distinto -> vars.ambientes.dev/prd (paridad: ambas). Cada llave lleva `# dl2-gen: crear · <origen>`.
@@ -2656,28 +2937,49 @@ def fusionar_dbt(texto, faltan, titulo, solo_con_valor=False, ordenado=True):
     return "\n".join(lines) + "\n", ""
 
 
-def escribir_dbt_vars(a, out_root, faltan, titulo):
-    """out/models/dbt_project.yml: dbt_project.yml de la rama + vars faltantes (pendientes vacías y marcadas)."""
+def escribir_dbt_vars(a, out_root, faltan, titulo, info=None):
+    """out/models/dbt_project.yml: dbt_project.yml de la rama con las vars renombradas en sitio + vars faltantes
+    (pendientes vacías y marcadas). Sin vars faltantes ni renombres no se escribe copia."""
     src = Path(a.models) / "dbt_project.yml"
-    if not faltan or not src.exists():
+    if not src.exists():
         return []
     texto, eol = leer_texto(src, a.models)
-    txt, nota = fusionar_dbt(texto, faltan, titulo, solo_con_valor=False)
+    texto0 = texto
+    notas_r = []
+    if info is not None:
+        texto, notas_r = renombrar_dbt(texto, info)
+    if not faltan and texto.rstrip("\n") == texto0.rstrip("\n"):
+        return notas_r
+    txt, nota = fusionar_dbt(texto, faltan, titulo, solo_con_valor=False) if faltan else (texto, "")
+    nota = nota or (notas_r[0] if notas_r else "")
     dst = out_root / "models/dbt_project.yml"
     dst.parent.mkdir(parents=True, exist_ok=True)
     escribir_texto(dst, txt, eol)
     return [nota] if nota else []
 
 
-def escribir_fuentes(a, out_root, fuentes):
-    """out/: __sources.yml por carpeta std_<dominio> con las tablas nuevas (el repo solo se lee)."""
+def escribir_fuentes(a, out_root, fuentes, info=None):
+    """out/: __sources.yml por carpeta std_<dominio> con las tablas nuevas (el repo solo se lee). Además, todo
+    __sources.yml del repo con el source raw_<código anterior> sale renombrado aunque el dominio no tenga tablas nuevas
+    (si no, un dominio quedaría apuntando a la var del dataset anterior)."""
     notas, models = [], Path(a.models) / f"{DBT}/models"
     plantilla = next((f.read_text(encoding="utf-8") for f in sorted(models.glob("std_*/__sources.yml"))), "")
+    hechos = {dom for (dom, _) in fuentes}
+    for f in sorted(models.glob("std_*/__sources.yml")):             # dominios solo con renombre
+        dom = f.parent.name.removeprefix("std_")
+        if dom in hechos or not _cambian():
+            continue
+        texto, eol = leer_texto(f, a.models)
+        txt = renombrar_fuentes(texto, info)
+        if txt.rstrip("\n") != texto.rstrip("\n"):
+            dst = out_root / "models" / f.relative_to(a.models)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            escribir_texto(dst, txt, eol)
     for (dom, sis), tablas in fuentes.items():
         rel = Path(f"{DBT}/models") / f"std_{dom}" / "__sources.yml"
         src = Path(a.models) / rel
         texto, eol = leer_texto(src, a.models) if src.exists() else ("", "\n")
-        txt, nota = fusionar_fuentes(texto, sis, tablas, plantilla)
+        txt, nota = fusionar_fuentes(texto, sis, tablas, plantilla, info)
         if nota:
             notas.append(f"std_{dom}/__sources.yml: {nota}")
         if not txt.strip():
@@ -2699,21 +3001,76 @@ def estado_llave(k, e, envs, propuestas):
     return "vacía en el repo" if k in envs.get(e, {}) else "PENDIENTE"
 
 
-def escribir_estado(maestra, R, resumen, propuestas, envs, notas_src, pt_dbt, dbt_nuevas=None, conservados=()):
+def seccion_renombre(maestra, resumen, ren):
+    """Sección ESTADO.md «Renombre de sistema»: solo si el sistema tiene nombre DL 2.0 distinto del código. Solo nombres
+    de llaves y rutas, sin valores ni IDs de proyecto."""
+    nom = nombre_sis(maestra)
+    if nom == maestra:
+        return []
+    r_ = ren or {}
+    ret = r_.get("retiro") or {"rutas": [], "productivo": [], "omitidos": []}
+    L = ["", "## Renombre de sistema", "",
+         f"Decisión TL (20-nov): el nombre DL 2.0 del sistema es `{nom}` (código de entrada `{maestra}`, que sigue en `in/`, "
+         f"`out/{maestra}/` y la lista de tablas). Nada de lo generado en `artifacts/` y `models/` lleva el nombre anterior.", ""]
+    creadas = sorted({Path(x).parent.as_posix() for r in resumen for x in r.get("archivos", [])})
+    L += ["### Rutas creadas (out/)", ""] + ([f"- `{x}`" for x in creadas] or ["- (ninguna: sin tablas con archivos)"])
+    L += ["", f"### Rutas retiradas (`out/{maestra}/out/retirar_anteriores.sh`, se ejecuta en la rama de trabajo)", ""]
+    L += [f"- `{x}`" for x in ret["rutas"]] or ["- ninguna (no hay archivos versionados con marca `dl2-gen` y el nombre anterior)"]
+    for t_ in ret["productivo"]:
+        L.append(f"- productivo: requiere aprobación TL: `{t_}` (no se incluye en el script)")
+    for x, motivo in ret["omitidos"]:
+        L.append(f"- no se retira: `{x}` ({motivo})")
+    if ret.get("huerfanos"):
+        L += ["", "AVISO: estos archivos con el nombre anterior NO se retiran y usan llaves que ahora se renombran en "
+              "variables.yaml / dbt_project.yml; al copiar quedarían sin llave. Migrarlos a mano o retirarlos con el TL: "
+              + ", ".join(f"`{x}`" for x in ret["huerfanos"])]
+    llaves = sorted(set(r_.get("llaves", [])) | set(r_.get("dbt_llaves", [])))
+    L += ["", "### Llaves renombradas (solo nombres; mismo valor y misma línea en variables.yaml / dbt_project.yml)", ""]
+    L += [f"- `{a_}` → `{b_}`" for a_, b_ in llaves] or ["- ninguna"]
+    rec = sorted(set(r_.get("recursos", [])) | set(r_.get("dbt_recursos", [])))
+    if rec:
+        L += ["", "Recursos con el valor pasado a la convención nueva (llevan la nota `renombrado (TL 20-nov): confirmar que "
+                  "el recurso existe`; su creación se solicita en Terraform):", ""] + [f"- `{k}`" for k in rec]
+    otro = sorted(set(r_.get("recursos_otro_valor", [])) | set(r_.get("dbt_recursos_otro_valor", [])))
+    if otro:
+        L += ["", "Llaves de recurso renombradas cuyo valor NO seguía la convención vieja (se conserva el valor; revisar): "
+              + ", ".join(f"`{k}`" for k in otro)]
+    viejas = sorted(set(r_.get("viejas", [])) | set(r_.get("dbt_viejas", [])))
+    if viejas:
+        L += ["", "Llaves/sources anteriores que se dejan porque el nombre nuevo ya existía (no se duplicó; retirar a mano): "
+              + ", ".join(f"`{k}`" for k in viejas)]
+    if r_.get("fuentes"):
+        L += ["", "Sources renombrados en `__sources.yml`: " + ", ".join(f"`{a_}` → `{b_}`" for a_, b_ in r_["fuentes"])]
+    if r_.get("residuales"):
+        L += ["", "AVISO: quedan referencias al nombre anterior en la copia de out/ (revisar a mano): "
+              + ", ".join(sorted(set(r_["residuales"])))]
+    L += ["", "### Objetos que quedan en dev para limpieza del TL (por patrón)", "",
+          f"- Dataset raw anterior (`raw_{maestra}` o `raw_<nombre anterior de recurso>`, el que exista): sus tablas.",
+          f"- Dataset std: tablas `{maestra}_<tabla>_hist` y `{maestra}_<tabla>_current`.",
+          f"- Composer: DAGs `{PREFIJO_DAG}{maestra}_*`.",
+          "- La limpieza del deploy de dev retira de los buckets los YAML/JSON y DAG con el nombre anterior cuando se "
+          "mergean los retiros; confirmar que corrió.", "",
+          "Las tablas `_hist` nuevas arrancan vacías: la primera corrida es carga completa (todo `op = I`). Reprocesar fechas "
+          "anteriores obliga a hacerlo en orden."]
+    return L
+
+
+def escribir_estado(maestra, R, resumen, propuestas, envs, notas_src, pt_dbt, dbt_nuevas=None, conservados=(), ren=None, prueba=None):
     listos = [r for r in resumen if r["estado"] == "LISTO"]
-    L = [f"# Estado {maestra} · {date.today().isoformat()} · gen_ingestas v{VERSION}", "",
+    nom_ = nombre_sis(maestra)
+    L = [f"# Estado {nom_} · {date.today().isoformat()} · gen_ingestas v{VERSION}", "",
          f"Tablas: {len(resumen)} · listas: {len(listos)} · borrador: {sum(r['estado'] == 'BORRADOR' for r in resumen)} · "
          f"sin fuente: {sum(r['estado'] == 'SIN FUENTE' for r in resumen)}", "",
          "| Tabla | Estado | Conexión DL 1.0 | Pendiente |", "|---|---|---|---|"]
     for r in resumen:
-        L.append(f"| {r['tabla']} | {r['estado']} | {r.get('dl1', '-')} | {'<br>'.join(r['pend'] + r.get('extra', [])) or '—'} |")
+        L.append(f"| {r.get('nom', r['tabla'])} | {r['estado']} | {r.get('dl1', '-')} | {'<br>'.join(r['pend'] + r.get('extra', [])) or '—'} |")
     carga = [r for r in resumen if r.get("carga")]
     if carga:
         L += ["", "## Estrategia de carga", "",
               "| Tabla | Estrategia | Sugerida | Columna control | Ventana (días) |", "|---|---|---|---|---|"]
         for r in carga:
             ef, sug, ven = r["carga"]
-            L.append(f"| {r['tabla']} | {ef['est']}{' (por confirmar)' if ef['pend'] else ''} | {sug or '—'} | "
+            L.append(f"| {r.get('nom', r['tabla'])} | {ef['est']}{' (por confirmar)' if ef['pend'] else ''} | {sug or '—'} | "
                      f"{ef['control'] or '—'} | {ven if ef['est'] == 'incremental' else '—'} |")
         L += ["", "snapshot = copia completa diaria; incremental = extrae la ventana de días hacia atrás de la columna de control "
                   "y no detecta borrados físicos (programar una conciliación periódica con cdc_hash); cdc_hash = extrae "
@@ -2726,7 +3083,7 @@ def escribir_estado(maestra, R, resumen, propuestas, envs, notas_src, pt_dbt, db
             L += ["", "### Carga inicial (tablas incremental)", "",
                   "La extracción incremental solo trae la ventana de días; la primera vez hay que traer la tabla completa. "
                   "DAG de extracción de cada tabla:", ""]
-            L += [f"- `{PREFIJO_DAG}{r['tabla']}-extraction`" for r in inc]
+            L += [f"- `{PREFIJO_DAG}{r.get('nom', r['tabla'])}-extraction`" for r in inc]
             L += ["", f"1. Una sola vez por tabla: \"Trigger DAG w/ config\" con `{{\"{FECHA_INFO}\": \"1900-01-01\"}}`: la "
                       "extracción trae la tabla completa y `_hist` la carga como I.",
                   "2. Confirmar antes en dev que la config reemplaza los params del DAG.",
@@ -2764,6 +3121,8 @@ def escribir_estado(maestra, R, resumen, propuestas, envs, notas_src, pt_dbt, db
     if any(r.get("extra") and r["extra"][0].startswith("extractor: jdbc") for r in resumen):
         L += ["", "JDBC deja el CSV sin cifrar en el bucket de landing hasta la carga a raw: confirmar IAM, ciclo de "
                   "vida y CMEK del bucket (pendientes TL) antes de prd con PII."]
+    L += seccion_renombre(maestra, resumen, ren)
+    L += seccion_prueba(maestra, prueba)
     L += ["", "## Siguiente paso",
           f"1. Gobierno trabaja `in/{maestra}_columnas.csv`: filtrar `estado_gobierno` = pendiente / en revisión, definir "
           f"`policy_tag` y pasar la columna a `aprobado` (responsable, ticket y observaciones se conservan); columnas "
@@ -2777,7 +3136,160 @@ def escribir_estado(maestra, R, resumen, propuestas, envs, notas_src, pt_dbt, db
           f"`out/` replica las rutas de los repos: `artifacts/` → {CLI['dir_artifacts']}, `models/` → "
           f"{CLI['dir_models']}. `trazabilidad_dl1.csv` y `artifacts/co/variables.yaml` llevan valores "
           "de conexión: SENSIBLE, no compartir."]
+    if nom_ != maestra:
+        L.insert(len(L) - 2,
+                 f"6. Con el nombre anterior en la rama de trabajo: `bash out/{maestra}/out/retirar_anteriores.sh` (después de "
+                 "copiar_a_repos.sh; solo `git rm` de lo versionado con marca `dl2-gen`) → git status → commit.")
     R["estado"].write_text("\n".join(L) + "\n", encoding="utf-8")
+
+
+# ----------------------------------------------------------------------------- prueba de conexión (v6.6)
+PRUEBA_TAG, PRUEBA_RAMA = "prueba-conexion", "test/"   # marca propia del YAML · prefijo de la única rama donde se copia
+PRUEBA_REGEX = "n/a.*\\/.*.csv$"                       # nunca coincide: lnd-to-transformed no se dispara
+# tecnología -> (consulta mínima al diccionario del motor, columnas que declara el extractor cipher)
+PRUEBA_SQL = {
+    "oracle": ("SELECT owner, table_name FROM ALL_TABLES WHERE ROWNUM <= 10", "owner,table_name"),
+    "sqlserver": ("SELECT TOP 10 TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES", "TABLE_SCHEMA,TABLE_NAME"),
+    "db2": ("SELECT TABSCHEMA, TABNAME FROM SYSCAT.TABLES FETCH FIRST 10 ROWS ONLY", "TABSCHEMA,TABNAME"),
+}
+
+def es_prueba_conexion(path):
+    """True si la primera línea del archivo lleva la marca dl2-gen con prueba-conexion."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            l = f.readline()
+    except OSError:
+        return False
+    return MARCA in l and PRUEBA_TAG in l
+
+def yaml_prueba(y, t):
+    """Ingesta de prueba de conexión a partir del dict renderizado de una tabla (patrón <sis>/all_tables). Conserva conexión,
+    secretos, bucket de landing y tópicos (lo que se prueba) y cambia solo lo necesario para no tocar tablas de negocio ni
+    disparar lnd-to-transformed. -> (dict, consulta, columnas, aviso)."""
+    tec = (t.get("tecnologia") or "").strip().lower()
+    consulta, columnas = PRUEBA_SQL.get(tec) or PRUEBA_SQL["oracle"]
+    aviso = "" if tec in PRUEBA_SQL else f"tecnología '{tec or '-'}' sin consulta propia: se usó la de Oracle; confirmar"
+    p = copy.deepcopy(y)
+    if t["extractor"] == "cipher":
+        put(p, "extractor.query_string", consulta)
+        put(p, "extractor.columns", columnas)
+    else:
+        put_ref(p, "extractor.env#source.query_string", consulta)
+    put(p, "gcp.gcs.ln.regex", PRUEBA_REGEX)
+    put(p, "gcp.bigquery.raw.raw_table", "na")
+    put(p, "gcp.bigquery.raw.raw_schema", "na")
+    put(p, "gcp.bigquery.trf_steps", [{"dbt_model": "na"}])
+    put(p, "gcp.composer.extraction.scheduling", "")
+    return p, consulta, columnas, aviso
+
+def _sh(x):
+    return "'" + str(x).replace("'", "'\\''") + "'"
+
+def _guarda_rama(var):
+    """Líneas bash: se niega en ramas protegidas o sin rama."""
+    return [f'b=$(git -C "${var}" branch --show-current)',
+            'case "$b" in ' + "|".join(PROTEGIDAS) + '|"") echo "ERROR: ' + f'${var}' + ' está en la rama \'$b\' (protegida o sin rama): cambiar a una rama de trabajo"; exit 1;; esac']
+
+def escribir_scripts_prueba(a, out_root, nom):
+    """out/<sis>/out/copiar_prueba_conexion.sh y retirar_prueba_conexion.sh (los ejecuta el usuario; el generador no)."""
+    rel = Path(os.path.relpath(a.artifacts, out_root)).as_posix()
+    hoy = date.today().isoformat()
+    dir_rel = f"co/data_source/{nom}/all_tables"
+    arc = f"{nom}_all_tables.yaml"
+    L = ["#!/usr/bin/env bash",
+         f"# gen_ingestas v{VERSION} · {hoy} · {nom}: copia la ingesta de PRUEBA DE CONEXIÓN (y co/variables.yaml) al repo de artifacts.",
+         f"# Solo en ramas {PRUEBA_RAMA}*. Revisar ESTADO.md (sección Prueba de conexión). No hace commit.",
+         "set -euo pipefail", 'cd "$(dirname "$0")"', f'ART="${{ART:-{rel}}}"']
+    L += _guarda_rama("ART")
+    L += [f'case "$b" in {PRUEBA_RAMA}*) ;; *) echo "ERROR: la rama \'$b\' no empieza por {PRUEBA_RAMA}: crear {PRUEBA_RAMA}DL2-<ticket>-conexion-{nom} desde {RAMA_PRD_DL2}"; exit 1;; esac',
+          'echo "$ART → $b"',
+          f'mkdir -p "${{ART}}/{dir_rel}" && cp {_sh("prueba_conexion/artifacts/" + dir_rel + "/" + arc)} "${{ART}}/{dir_rel}/{arc}"',
+          'if [ -f artifacts/co/variables.yaml ]; then',
+          '  mkdir -p "${ART}/co" && cp artifacts/co/variables.yaml "${ART}/co/variables.yaml"',
+          "else",
+          '  echo "AVISO: no hay artifacts/co/variables.yaml en out/: las llaves de conexión nuevas deben existir ya en el repo"',
+          "fi",
+          f'echo "Copiados {arc} y co/variables.yaml (revisar git diff: variables.yaml trae todo lo generado del sistema)."',
+          f'echo "Solo PR a {RAMA_DEV_DL2}. Nunca a {RAMA_PRD_DL2}. Borrar con retirar_prueba_conexion.sh después del diagnóstico"']
+    (out_root / "copiar_prueba_conexion.sh").write_text("\n".join(L) + "\n", encoding="utf-8", newline="\n")
+    R_ = ["#!/usr/bin/env bash",
+          f"# gen_ingestas v{VERSION} · {hoy} · {nom}: retira del repo de artifacts la ingesta de PRUEBA DE CONEXIÓN ({dir_rel}).",
+          f"# Solo si el YAML lleva la marca {PRUEBA_TAG}. Se ejecuta en una rama de trabajo (nunca en {', '.join(PROTEGIDAS)}). No hace commit.",
+          "set -euo pipefail", 'cd "$(dirname "$0")"', f'ART="${{ART:-{rel}}}"']
+    R_ += _guarda_rama("ART")
+    R_ += [f'D={_sh(dir_rel)}', f'Y="$D/{arc}"',
+           'if [ ! -f "$ART/$Y" ]; then echo "Nada que retirar: no existe $Y en la rama \'$b\'"; exit 0; fi',
+           f"if ! head -n 1 \"$ART/$Y\" | grep -Eq '^# {MARCA}: .*\\| {PRUEBA_TAG} \\|'; then "
+           f'echo "ERROR: $Y no lleva la marca {PRUEBA_TAG}: no es una prueba generada, no se retira"; exit 1; fi',
+           'otros=$(git -C "$ART" ls-files -- "$D" | grep -vxF "$Y" || true)',
+           'if [ -n "$otros" ]; then echo "ERROR: $D tiene otros archivos versionados además de la prueba: no se retira"; exit 1; fi',
+           'if git -C "$ART" ls-files --error-unmatch -- "$Y" >/dev/null 2>&1; then',
+           '  git -C "$ART" rm -r -q -- "$D"',
+           '  echo "Retirado $D (git rm). Revisar git status, commitear y PR."',
+           "else",
+           '  rm -f "$ART/$Y" && rmdir "$ART/$D" 2>/dev/null || true',
+           '  echo "Retirado $D del disco (no estaba versionado)."',
+           "fi"]
+    (out_root / "retirar_prueba_conexion.sh").write_text("\n".join(R_) + "\n", encoding="utf-8", newline="\n")
+
+def escribir_prueba(a, maestra, out_root, base, resumen):
+    """Genera out/<sis>/out/prueba_conexion/artifacts/co/data_source/<nom>/all_tables/<nom>_all_tables.yaml (árbol aparte: copiar_a_repos.sh
+    nunca lo copia) y los dos scripts. base = (fila de tabla, dict YAML) de la primera tabla con YAML, LISTO o BORRADOR.
+    -> info para ESTADO.md."""
+    nom = nombre_sis(maestra)
+    if getattr(a, "sin_prueba", False):
+        (out_root / "copiar_prueba_conexion.sh").unlink(missing_ok=True)
+        return {"estado": "omitida"}
+    if base is None:
+        (out_root / "copiar_prueba_conexion.sh").unlink(missing_ok=True)
+        return {"estado": "sin_yaml"}
+    t, y = base
+    p, consulta, columnas, aviso = yaml_prueba(y, t)
+    cipher = t["extractor"] == "cipher"
+    dest = out_root / "prueba_conexion/artifacts/co/data_source" / nom / "all_tables" / f"{nom}_all_tables.yaml"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    marca = f"# {MARCA}: {GEN} | {PRUEBA_TAG} | {date.today().isoformat()} | {nom.upper()}.all_tables\n"
+    dest.write_text(marca + dump(p), encoding="utf-8", newline="\n")
+    escribir_scripts_prueba(a, out_root, nom)
+    key = f"{t['sistema']}_{t['tabla']}"
+    est = next((r["estado"] for r in resumen if r["tabla"] == key), "")
+    return {"estado": "generada", "nom": nom, "ruta": dest.relative_to(out_root).as_posix(),
+            "tabla": f"{nom}_{t['tabla']}", "est_tabla": est, "variante": "cipher" if cipher else "jdbc",
+            "tecnologia": (t.get("tecnologia") or "").strip().lower() or "-", "consulta": consulta,
+            "columnas": columnas if cipher else "", "dag": f"{PREFIJO_DAG}{nom}_all_tables-extraction", "aviso": aviso}
+
+def seccion_prueba(maestra, info):
+    """Sección ESTADO.md «Prueba de conexión»."""
+    L = ["", "## Prueba de conexión", ""]
+    est = (info or {}).get("estado")
+    if est == "omitida":
+        return L + ["Omitida (`--sin-prueba`): no se generó la ingesta de prueba de conexión."]
+    if est != "generada":
+        return L + ["No se generó: ninguna tabla del sistema tiene YAML (sin columnas o sin fuente). Se genera con la primera tabla "
+                    "que tenga YAML, aunque esté en BORRADOR."]
+    nom, dev, prd = info["nom"], RAMA_DEV_DL2, RAMA_PRD_DL2
+    ext = "avro" if info["variante"] == "cipher" else "CSV"
+    L += ["Ingesta mínima que solo prueba conexión, secreto, cuenta de servicio, bucket de landing y tópicos: consulta el diccionario del "
+          "motor, no toca tablas de negocio y no dispara lnd-to-transformed (regex que nunca coincide, raw y dbt en `na`, sin schedule).", "",
+          f"- Archivo generado: `out/{maestra}/out/{info['ruta']}` (árbol aparte: `copiar_a_repos.sh` nunca lo copia)",
+          f"- Tabla base: `{info['tabla']}` ({info['est_tabla'] or '-'}) · variante {info['variante']} · tecnología {info['tecnologia']}",
+          f"- Consulta: `{info['consulta']}`" + (f" · columnas: `{info['columnas']}`" if info["columnas"] else ""),
+          f"- DAG esperado: `{info['dag']}`"]
+    if info["aviso"]:
+        L.append(f"- AVISO: {info['aviso']}")
+    L += ["", "Procedimiento:", "",
+          f"1. Crear la rama `{PRUEBA_RAMA}DL2-<ticket>-conexion-{nom}` desde `{prd}` en el repo de artifacts.",
+          f"2. `bash out/{maestra}/out/copiar_prueba_conexion.sh` (copia el YAML de prueba y `co/variables.yaml`; se niega fuera de ramas `{PRUEBA_RAMA}*`).",
+          f"3. `git diff` → commit → PR a `{dev}`. Nunca a `{prd}`.",
+          f"4. Tras el deploy de {dev}, \"Trigger DAG\" de `{info['dag']}` en Composer.",
+          f"5. Verificar que llegue a landing un {ext} de `{nom}_all_tables`. Si llega: conexión, secreto, cuenta de servicio y bucket están OK "
+          "y el problema está en la consulta de la tabla o en los permisos sobre ella. Si no llega: revisar conectividad, lista blanca, "
+          "secreto y bucket.",
+          f"6. Con el diagnóstico hecho: `bash out/{maestra}/out/retirar_prueba_conexion.sh` en una rama de trabajo (solo retira si el YAML lleva "
+          f"la marca `{PRUEBA_TAG}`) → commit → PR a `{dev}`. La limpieza del deploy de {dev} retira el DAG al borrar el YAML.", "",
+          f"Recordar: la prueba nunca va a `{prd}`."]
+    return L
+
 
 
 def escribir_copia(a, maestra, out_root, resumen):
@@ -2786,19 +3298,18 @@ def escribir_copia(a, maestra, out_root, resumen):
     Se niega a copiar si artifacts o data-models están en una rama protegida o sin rama."""
     rel = lambda r: Path(os.path.relpath(r, out_root)).as_posix()
     listos = [r for r in resumen if r["estado"] == "LISTO"]
-    arch = [x for r in listos for x in r["archivos"]]
-    doms = {r["fuente"][0] for r in listos if r.get("fuente")}
+    arch = [x for r in listos for x in r["archivos"] if not x.startswith("prueba_conexion/")]   # la prueba de conexión nunca va aquí
     compartidos = [x for x in ("artifacts/co/variables.yaml", "models/dbt_project.yml") if (out_root / x).exists()]
-    compartidos += [f"models/{DBT}/models/std_{d}/__sources.yml" for d in sorted(doms)
-                    if (out_root / f"models/{DBT}/models/std_{d}/__sources.yml").exists()]
+    compartidos += sorted(f.relative_to(out_root).as_posix()               # todo __sources.yml generado (nuevas tablas o renombre)
+                          for f in (out_root / "models").rglob("__sources.yml"))
     L = ["#!/usr/bin/env bash",
-         f"# gen_ingestas v{VERSION} · {date.today().isoformat()} · {maestra}: copia a las ramas de trabajo SOLO las tablas LISTO",
+         f"# gen_ingestas v{VERSION} · {date.today().isoformat()} · {nombre_sis(maestra)}: copia a las ramas de trabajo SOLO las tablas LISTO",
          f"# ({len(listos)} de {len(resumen)}). Revisar ESTADO.md antes. Después: git status, git diff, run_checks.py.",
          "set -euo pipefail", 'cd "$(dirname "$0")"',
          f'ART="${{ART:-{rel(a.artifacts)}}}"', f'MOD="${{MOD:-{rel(a.models)}}}"',
          'for r in "$ART" "$MOD"; do',
          '  b=$(git -C "$r" branch --show-current)',
-         '  case "$b" in ' + "|".join(CLI["ramas_protegidas"]) + '|"") echo "ERROR: $r está en la rama \'$b\': cambiar a la rama de trabajo"; exit 1;; esac',
+         '  case "$b" in ' + "|".join(PROTEGIDAS) + '|"") echo "ERROR: $r está en la rama \'$b\': cambiar a la rama de trabajo"; exit 1;; esac',
          '  echo "$r → $b"', "done"]
     if not listos:
         L += ['echo "Ninguna tabla LISTO: no se copia nada (ver ESTADO.md)"']
@@ -2811,6 +3322,126 @@ def escribir_copia(a, maestra, out_root, resumen):
               'Revisar git diff (variables.yaml, dbt_project.yml y __sources.yml traen todo lo generado del sistema)."']
     f = out_root / "copiar_a_repos.sh"
     f.write_text("\n".join(L) + "\n", encoding="utf-8", newline="\n")
+
+
+def _git_lista(repo, *args):
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True)
+    return [x for x in r.stdout.decode("utf-8", "replace").split("\0") if x] if r.returncode == 0 else []
+
+
+def _tabla_vieja(rel, sis):
+    """Tabla a la que pertenece una ruta con el nombre anterior (data_source/<sis>/<tabla>/… o <sis>_<tabla>[_hist|_current])."""
+    partes = rel.split("/")
+    if "data_source" in partes and len(partes) > partes.index("data_source") + 2:
+        return partes[partes.index("data_source") + 2]
+    for p_ in reversed(partes):
+        m = re.match(rf"(?i){re.escape(sis)}_(.+?)(?:_hist|_current)?(?:\.\w+)?$", p_)
+        if m:
+            return m.group(1).lower()
+    return rel
+
+
+def candidatos_retiro(a, sis):
+    """Archivos con el nombre anterior en la rama de trabajo: (repo, ruta relativa, tabla, retirable, motivo).
+    Retirable = existe, está versionado y lleva la marca dl2-gen. Una tabla con algún modelo en origin/<rama productiva> no se retira."""
+    rx = re.compile(rf"(?<![A-Za-z0-9]){re.escape(sis)}(?![A-Za-z0-9])", re.I)
+    cand = []
+    for clave, repo, base in (("ART", a.artifacts, "co/data_source"), ("MOD", a.models, f"{DBT_DIR}/models")):
+        for rel in _git_lista(repo, "ls-files", "-z", "--", base):
+            if any(rx.search(p_) for p_ in rel.split("/")):
+                f = Path(repo) / rel
+                if "all_tables" in rel.split("/") and es_prueba_conexion(f):
+                    continue                       # la prueba de conexión la retira retirar_prueba_conexion.sh
+                ok, why = f.is_file() and tiene_marca(f), ""
+                if not f.is_file():
+                    why = "no existe en la rama"
+                elif not ok:
+                    why = "sin marca dl2-gen"
+                cand.append([clave, rel, _tabla_vieja(rel, sis), ok, why])
+    prod = set()
+    for clave, rel, tab, ok, _ in cand:
+        if clave == "MOD" and subprocess.run(["git", "-C", str(a.models), "cat-file", "-e", f"origin/{RAMA_PRD_DL2}:{rel}"],
+                                              capture_output=True).returncode == 0:
+            prod.add(tab)
+    for c in cand:
+        if c[2] in prod and c[3]:
+            c[3], c[4] = False, "productivo"
+    return cand, sorted(prod)
+
+
+def escribir_retiro(a, maestra, out_root, resumen):
+    """out/<sis>/out/retirar_anteriores.sh: `git rm` de lo generado con el nombre anterior (solo rutas versionadas con marca
+    dl2-gen; nunca sin marca ni no versionadas; una tabla con modelo en origin/<rama productiva> queda fuera: requiere aprobación TL).
+    Lo ejecuta el usuario en la rama de trabajo (mismas protecciones de rama que copiar_a_repos.sh). Solo si el sistema
+    tiene nombre DL 2.0 distinto del código."""
+    if nombre_sis(maestra) == maestra:
+        return
+    cand, prod = candidatos_retiro(a, maestra)
+    ok = {(c[0], c[1]) for c in cand if c[3]}
+    todos = {c[0]: [] for c in cand}
+    for c in cand:
+        todos[c[0]].append(c[1])
+    untracked = {k: set(_git_lista(r_, "ls-files", "-z", "-o", "--exclude-standard")) for k, r_ in (("ART", a.artifacts), ("MOD", a.models))}
+    rx = re.compile(rf"(?<![A-Za-z0-9]){re.escape(maestra)}(?![A-Za-z0-9])", re.I)
+    cmds, rutas_, vistos = [], [], set()
+    def rm(clave, d):
+        """git rm -r del directorio d si TODO lo versionado debajo es retirable y no hay archivos sin versionar; si no, baja un nivel."""
+        bajo = [x for x in todos.get(clave, []) if x.startswith(d + "/")]
+        if bajo and all((clave, x) in ok for x in bajo) and not any(u.startswith(d + "/") for u in untracked[clave]):
+            cmds.append((clave, "rm -r", d))
+            return
+        hijos = sorted({x[len(d) + 1:].split("/")[0] for x in bajo})
+        for h in hijos:
+            ruta = f"{d}/{h}"
+            if ruta in todos.get(clave, []):
+                if (clave, ruta) in ok:
+                    cmds.append((clave, "rm", ruta))
+            else:
+                rm(clave, ruta)
+    for clave, repo, base in (("ART", a.artifacts, "co/data_source"), ("MOD", a.models, f"{DBT_DIR}/models")):
+        tops = sorted({"/".join(x.split("/")[:next(i for i, p_ in enumerate(x.split("/")) if rx.search(p_)) + 1])
+                       for x in todos.get(clave, [])})
+        for t_ in tops:
+            if t_ in todos.get(clave, []):                       # el propio archivo lleva el nombre anterior
+                if (clave, t_) in ok:
+                    cmds.append((clave, "rm", t_))
+            else:
+                rm(clave, t_)
+    omit = sorted({(c[1], c[4]) for c in cand if not c[3] and c[4] != "productivo"})
+    nombres_prod = sorted({c[2] for c in cand if c[4] == "productivo"})
+    llaves_ren = {k for k, _ in a.ren["llaves"] + a.ren.get("dbt_llaves", [])}
+    huerfanos = []                    # quedan con el nombre anterior y usan llaves que ahora se renombran: se rompen al copiar variables.yaml
+    for clave, rel_, _ in ((c[0], c[1], c[4]) for c in cand if not c[3] and c[4] != "productivo"):
+        f = Path(a.artifacts if clave == "ART" else a.models) / rel_
+        try:
+            txt = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if any(re.search(TOKEN(k), txt) for k in llaves_ren):
+            huerfanos.append(rel_)
+    a.ren["retiro"] = {"rutas": [f"{'artifacts' if k == 'ART' else 'models'}/{d}" for k, _, d in cmds],
+                       "productivo": nombres_prod, "omitidos": omit, "huerfanos": sorted(huerfanos)}
+    rel = lambda r: Path(os.path.relpath(r, out_root)).as_posix()
+    q = lambda x: "'" + x.replace("'", "'\\''") + "'"
+    L = ["#!/usr/bin/env bash",
+         f"# gen_ingestas v{VERSION} · {date.today().isoformat()} · {nombre_sis(maestra)}: retira de la rama de trabajo lo generado con el",
+         f"# nombre anterior ({maestra}). Solo rutas versionadas con marca {MARCA}; ejecutar DESPUÉS de copiar_a_repos.sh.",
+         "# Revisar con git status / git diff --cached antes de commitear. No hace commit.",
+         "set -euo pipefail", 'cd "$(dirname "$0")"',
+         f'ART="${{ART:-{rel(a.artifacts)}}}"', f'MOD="${{MOD:-{rel(a.models)}}}"',
+         'for r in "$ART" "$MOD"; do',
+         '  b=$(git -C "$r" branch --show-current)',
+         '  case "$b" in ' + "|".join(PROTEGIDAS) + '|"") echo "ERROR: $r está en la rama \'$b\': cambiar a la rama de trabajo"; exit 1;; esac',
+         '  echo "$r → $b"', "done"]
+    for t_ in nombres_prod:
+        L.append(f'echo "AVISO: {t_}: productivo: requiere aprobación TL (no se retira)"')
+    if not cmds:
+        L.append('echo "Nada que retirar (ninguna ruta versionada con marca y el nombre anterior)"')
+    for clave, modo, d in cmds:
+        L.append(f'git -C "${{{clave}}}" {modo} -q -- {q(d)}')
+    if cmds:
+        L.append(f'echo "Retiradas {len(cmds)} rutas del nombre anterior. Revisar git status y commitear."')
+    (out_root / "retirar_anteriores.sh").write_text("\n".join(L) + "\n", encoding="utf-8", newline="\n")
 
 
 # ----------------------------------------------------------------------------- lista de trabajo
@@ -2838,7 +3469,7 @@ def procesar(a, maestra):
     R = rutas(maestra)
     a.tablas_pos, a.tablas, a.maestra = str(R["tablas"]), None, maestra
     cmd_scan(a)                                                   # 1. tablas, columnas, policy tags, estado_gobierno
-    envs = env_blocks(a.artifacts)
+    envs = envs_dl2(a.artifacts)
     propuestas, estado_conn = paso_conexiones(a, maestra, envs)   # 2. conexión DL 1.0 -> llaves DL 2.0
     with contextlib.redirect_stdout(io.StringIO()):
         cmd_scan(a)                                               # 3. re-scan con conexión resuelta (idempotente)
@@ -2847,6 +3478,8 @@ def procesar(a, maestra):
           f"{sum(r['estado'] == 'BORRADOR' for r in resumen)} borrador · "
           f"{sum(r['estado'] == 'SIN FUENTE' for r in resumen)} sin fuente → out/{maestra}/out/ESTADO.md")
     print(f"  copia a la rama de trabajo (cuando decidas): bash out/{maestra}/out/copiar_a_repos.sh")
+    if (getattr(a, "prueba", None) or {}).get("estado") == "generada":
+        print(f"  prueba de conexión (solo rama {PRUEBA_RAMA}*): bash out/{maestra}/out/copiar_prueba_conexion.sh")
 
 
 if __name__ == "__main__":
@@ -2859,6 +3492,8 @@ if __name__ == "__main__":
     p.add_argument("--adoptar", action="store_true", help="reemplaza tags existentes por el del catálogo si es más restrictivo")
     p.add_argument("--force", action="store_true", help="normaliza también modelos existentes sin marca")
     p.add_argument("--audit", action="store_true", help="solo cuenta archivos con y sin marca en los repos")
+    p.add_argument("--sin-prueba", action="store_true", dest="sin_prueba",
+                   help="no genera la ingesta de prueba de conexión (por defecto se genera una por sistema)")
     p.add_argument("--catalogo")
     p.add_argument("--repos", help="carpeta que contiene los 3 repos")
     for k in ("artifacts", "models", "ingdfw"):
@@ -2887,7 +3522,7 @@ if __name__ == "__main__":
         print(f"  aviso: in/{LISTA.name} sin columna extractor (cipher | jdbc): se usa la variante existente o jdbc")
     for r in lista:
         grupos[code(r.get("sistema_origen", "")) or "sin_sistema"].append(r)
-    pedidos = [norm(x) for x in a.sistemas] or sorted(grupos)
+    pedidos = [codigo_sis(norm(x)) for x in a.sistemas] or sorted(grupos)     # acepta el código (admiprod) o el nombre (admisiones)
     faltan = [s for s in pedidos if s not in grupos]
     if faltan:
         print(f"  sin tablas en in/{LISTA.name}: {', '.join(faltan)}")
