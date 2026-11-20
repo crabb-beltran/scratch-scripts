@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Estrategias de carga · DL 2.0</title>
+<style>
+:root{
+  --bg:#f5f6f8; --surface:#ffffff; --surface2:#eef1f5; --border:#d3d8e0; --text:#1a2230; --muted:#566275;
+  --accent:#1d4f91; --accent-bg:#e4eef9; --hl:#e4eef9;
+  --good:#17693f; --good-bg:#e3f3ea; --warn:#8a5a00; --warn-bg:#fbf0d9; --bad:#a82419; --bad-bg:#fbe7e4;
+  --c-snap:#6b7c93; --c-inc:#2a68b0; --c-cdc:#14806f;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0f141b; --surface:#171e28; --surface2:#1e2733; --border:#2e3a4a; --text:#e5e9ef; --muted:#9aa7ba;
+    --accent:#7db0f5; --accent-bg:#1b2d45; --hl:#1b2d45;
+    --good:#58c08a; --good-bg:#14301f; --warn:#e0b252; --warn-bg:#352a10; --bad:#f0897f; --bad-bg:#3a1a18;
+    --c-snap:#8b9bb2; --c-inc:#6aa6ec; --c-cdc:#3fb9a4;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:64px}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 var(--sans)}
+code,pre,.mono{font-family:var(--mono)}
+code{font-size:.88em;background:var(--surface2);border:.5px solid var(--border);border-radius:4px;padding:0 4px}
+.wrap{max-width:1320px;margin:0 auto;padding:0 24px}
+header.top{padding:28px 0 16px}
+header.top h1{margin:0 0 4px;font-size:28px;font-weight:600;letter-spacing:-.01em}
+header.top p{margin:0;color:var(--muted);font-size:15px}
+nav.sec{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--border)}
+nav.sec .wrap{display:flex;gap:4px;flex-wrap:wrap;padding-top:8px;padding-bottom:8px}
+nav.sec a{color:var(--muted);text-decoration:none;padding:6px 12px;border-radius:8px;font-size:14px;border:.5px solid transparent}
+nav.sec a:hover,nav.sec a:focus-visible{color:var(--text);border-color:var(--border);background:var(--surface);outline:none}
+section{padding:32px 0 8px}
+h2{font-size:20px;font-weight:600;margin:0 0 4px}
+h2 + p.lead{margin:0 0 16px;color:var(--muted)}
+h3{font-size:14px;font-weight:600;margin:0 0 6px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px}
+.muted{color:var(--muted)}
+.small{font-size:13px}
+button{font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:7px 14px;cursor:pointer}
+button:hover{background:var(--surface2)}
+button:focus-visible,a:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button:disabled{opacity:.4;cursor:default}
+button[aria-pressed="true"],button[aria-selected="true"]{background:var(--accent-bg);border-color:var(--accent);color:var(--accent);font-weight:600}
+select{font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
+/* controles */
+.controls{display:flex;flex-wrap:wrap;gap:16px 28px;align-items:center;margin-bottom:12px}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--surface)}
+.seg button{border:0;border-radius:0;padding:8px 18px;font-family:var(--mono);font-size:14px}
+.seg button + button{border-left:1px solid var(--border)}
+.stepper{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.stepper .pills{display:flex;gap:6px}
+.stepper .pills button{padding:7px 12px}
+.hint{font-size:12px;color:var(--muted)}
+.scenario{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;margin-bottom:16px}
+.scn-note{margin:0 0 8px;font-size:14px}
+table{border-collapse:collapse;width:100%}
+.t{font-size:12.5px}
+.t th,.t td{padding:3px 8px;text-align:left;border-bottom:.5px solid var(--border);white-space:nowrap}
+.panel .t{font-size:11.5px}
+.panel .t th{white-space:nowrap;font-size:10.5px}
+.panel .t th,.panel .t td{padding:3px 5px}
+.t th{white-space:normal;word-break:break-word;vertical-align:bottom;font-weight:600;color:var(--muted);font-size:11.5px;background:var(--surface2)}
+.t td{font-family:var(--mono)}
+.t tr.new td{background:var(--hl)}
+.t tr.new td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+.t tr.ghost td{background:var(--bad-bg);color:var(--bad)}
+.t tr.gone td{color:var(--muted);text-decoration:line-through}
+.tw{overflow-x:auto;border:.5px solid var(--border);border-radius:8px}
+.badge{display:inline-block;font:600 11px var(--mono);padding:1px 6px;border-radius:5px;border:.5px solid var(--border);background:var(--surface2);color:var(--muted)}
+.b-I{background:var(--good-bg);color:var(--good);border-color:var(--good)}
+.b-U{background:var(--warn-bg);color:var(--warn);border-color:var(--warn)}
+.b-D{background:var(--bad-bg);color:var(--bad);border-color:var(--bad)}
+.b-acc{background:var(--accent-bg);color:var(--accent);border-color:var(--accent)}
+/* paneles */
+.panels{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start}
+@media (max-width:1100px){.panels{grid-template-columns:minmax(0,1fr)}}
+.panel{padding:14px}
+.panel h3.ph{display:flex;justify-content:space-between;align-items:baseline;font-size:15px;margin:0 0 10px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.panel h3.ph span{font-size:12px;font-weight:400;color:var(--muted)}
+.path{font:12.5px var(--mono);background:var(--surface2);border:.5px solid var(--border);border-radius:8px;padding:8px 10px;word-break:break-all;margin:0 0 8px}
+.csv{font:12px/1.5 var(--mono);background:var(--surface2);border:.5px solid var(--border);border-radius:8px;padding:8px 10px;margin:6px 0 10px;overflow-x:auto;white-space:pre}
+.flow{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin:2px 0 8px}
+.flow:before{content:"";width:16px;border-top:1.5px solid var(--muted)}
+.flow:after{content:"\25B6";font-size:9px}
+.callout{border:1px solid var(--border);border-left-width:3px;border-radius:8px;padding:8px 10px;font-size:13px;background:var(--surface2);margin:8px 0}
+.callout.warn{border-color:var(--warn);background:var(--warn-bg)}
+.callout.bad{border-color:var(--bad);background:var(--bad-bg)}
+.callout.good{border-color:var(--good);background:var(--good-bg)}
+.callout b{font-weight:600}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.stat{border:.5px solid var(--border);border-radius:8px;padding:6px 8px;background:var(--surface2)}
+.stat .n{font:600 20px var(--mono);line-height:1.2}
+.stat .l{font-size:11px;color:var(--muted);line-height:1.25}
+.tblock{margin:0 0 12px}
+.tblock .cap{display:flex;justify-content:space-between;gap:8px;font-size:12px;margin-bottom:4px}
+.tblock .cap code{font-size:11.5px}
+.tblock .cap span{color:var(--muted);text-align:right}
+/* codigo */
+.tabs{display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap}
+.tabs button{padding:4px 10px;font-size:13px;font-family:var(--mono)}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.chip{font:12px var(--mono);border:.5px solid var(--border);border-radius:6px;padding:2px 8px;background:var(--surface2)}
+.chip b{color:var(--accent);font-weight:600}
+.code{font:11.5px/1.55 var(--mono);background:var(--surface2);border:.5px solid var(--border);border-radius:8px;padding:8px 0;overflow-x:auto;max-height:520px;overflow-y:auto}
+.code .ln{display:block;padding:0 10px;white-space:pre;min-height:1.55em}
+.code .ln.hl{background:var(--hl);box-shadow:inset 3px 0 0 var(--accent)}
+.code .ln.dim{opacity:.4}
+.code .cm{color:var(--muted)}
+.code .jn{color:var(--accent)}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);margin-top:6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px;border:.5px solid var(--border)}
+/* chart + detecta */
+.below{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:16px;margin-top:16px;align-items:start}
+@media (max-width:1100px){.below{grid-template-columns:minmax(0,1fr)}}
+.chart svg{width:100%;height:auto;display:block}
+.chart text{font-family:var(--sans);fill:var(--muted);font-size:11px}
+.chart .val{fill:var(--text);font-family:var(--mono);font-size:11px}
+.chart .axis{stroke:var(--border);stroke-width:1}
+.chart .band{fill:var(--accent-bg)}
+.det{display:grid;gap:10px}
+.dcard{border:1px solid var(--border);border-radius:10px;padding:10px 12px;background:var(--surface)}
+.dcard.sel{border-color:var(--accent);background:var(--accent-bg)}
+.dcard h4{margin:0 0 4px;font:600 13px var(--mono);display:flex;gap:8px;align-items:center}
+.dcard p{margin:2px 0;font-size:13px}
+.guard{font:12.5px/1.6 var(--mono);background:var(--surface2);border:.5px solid var(--border);border-radius:8px;padding:6px 10px;margin-top:6px}
+/* comparativa */
+.cmp{font-size:13.5px}
+.cmp th,.cmp td{padding:9px 12px;border-bottom:.5px solid var(--border);text-align:left;vertical-align:top}
+.cmp thead th{font-family:var(--mono);font-size:13px;background:var(--surface2)}
+.cmp tbody th{color:var(--muted);font-weight:600;width:16%;white-space:nowrap}
+.cmp td.risk{color:var(--bad)}
+.cmp td.ok{color:var(--good)}
+/* arbol */
+.tree svg{width:100%;height:auto;display:block}
+.tree text{font-family:var(--sans);font-size:14px;fill:var(--text)}
+.tree .sm{font-size:12px;fill:var(--muted)}
+.tree .box{fill:var(--surface2);stroke:var(--border);stroke-width:1}
+.tree .res{stroke-width:1.5}
+.tree .r-snap{fill:var(--surface);stroke:var(--c-snap)}
+.tree .r-inc{fill:var(--surface);stroke:var(--c-inc)}
+.tree .r-cdc{fill:var(--surface);stroke:var(--c-cdc)}
+.tree .res-t{font-family:var(--mono);font-weight:600;font-size:15px}
+.tree .edge{stroke:var(--muted);stroke-width:1.2;fill:none}
+.tree .dash{stroke-dasharray:4 3}
+.tree .lbl{font-weight:600;font-size:12px;fill:var(--muted)}
+/* hist/current */
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+@media (max-width:1100px){.two{grid-template-columns:minmax(0,1fr)}}
+.two .card ul{margin:6px 0 0;padding-left:18px}
+.two .card li{margin:3px 0;font-size:14px}
+.sqlbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0 6px}
+ul.ops{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+@media (max-width:1100px){ul.ops{grid-template-columns:minmax(0,1fr)}}
+ul.ops li{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:14px}
+ul.ops li b{display:block;font-size:13px;margin-bottom:2px}
+footer{margin-top:40px;border-top:1px solid var(--border);padding:16px 0 32px;color:var(--muted);font-size:13px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.sr{position:absolute;left:-9999px}
+</style>
+</head>
+<body>
+
+<header class="top"><div class="wrap">
+  <h1>Estrategias de carga · DL 2.0</h1>
+  <p>snapshot, incremental y cdc_hash: qué se extrae, qué queda en GCS, BigQuery y dbt, y qué detecta cada una.</p>
+</div></header>
+
+<nav class="sec" aria-label="Secciones"><div class="wrap">
+  <a href="#simulador">Simulador</a>
+  <a href="#comparativa">Comparativa</a>
+  <a href="#decision">Árbol de decisión</a>
+  <a href="#hist-current">_hist y _current</a>
+  <a href="#operacion">Operación</a>
+</div></nav>
+
+<main class="wrap">
+
+<section id="simulador">
+  <h2>Simulador</h2>
+  <p class="lead small">Mismos datos de origen para las tres estrategias. Elige estrategia y día; las flechas del teclado (← →) cambian de día.</p>
+
+  <div class="controls">
+    <div>
+      <div class="hint" id="lbl-est">Estrategia</div>
+      <div class="seg" role="group" aria-labelledby="lbl-est" id="seg"></div>
+    </div>
+    <div>
+      <div class="hint" id="lbl-dia">Día</div>
+      <div class="stepper" role="group" aria-labelledby="lbl-dia">
+        <button id="prev" aria-label="Día anterior">&larr; Anterior</button>
+        <div class="pills" id="pills"></div>
+        <button id="next" aria-label="Día siguiente">Siguiente &rarr;</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="origen" style="margin-bottom:16px"></div>
+
+  <div class="panels" id="panels" aria-live="polite"></div>
+
+  <div class="below">
+    <div class="card chart">
+      <h3>Filas almacenadas en <code>_hist</code> por día</h3>
+      <div class="hint" style="margin-bottom:6px">Acumulado al cierre de cada día. Estrategia seleccionada resaltada.</div>
+      <div id="chart"></div>
+    </div>
+    <div>
+      <h3 style="margin-bottom:8px">Qué detecta cada estrategia este día</h3>
+      <div class="det" id="det" aria-live="polite"></div>
+    </div>
+  </div>
+</section>
+
+<section id="comparativa">
+  <h2>Comparativa</h2>
+  <p class="lead small">Criterio de elección: llave + fecha de modificación → incremental; llave sin fecha → cdc_hash; sin llave → snapshot.</p>
+  <div class="card" style="padding:0;overflow-x:auto">
+  <table class="cmp">
+    <thead><tr><th></th><th>snapshot</th><th>incremental</th><th>cdc_hash</th></tr></thead>
+    <tbody>
+      <tr><th>Extracción del origen</th><td>Tabla completa, cada día.</td><td>Solo filas con <code>fecha_modificacion</code> dentro de la ventana (1 día, con solape). La carga inicial trae todo, una vez.</td><td>Tabla completa, cada día.</td></tr>
+      <tr><th>Qué guarda <code>_hist</code></th><td>Foto completa por partición <code>information_date</code>.</td><td>Solo cambios (I/U) con <code>op</code> y <code>row_hash</code>.</td><td>Solo cambios (I/U/D) con <code>op</code> y <code>row_hash</code>.</td></tr>
+      <tr><th>Detecta borrados</th><td>Implícito: la fila no aparece en la foto. Sin marca.</td><td class="risk">No. Un borrado físico en el origen es invisible; la fila sigue vigente en <code>_current</code>.</td><td class="ok">Sí: <code>op = D</code>.</td></tr>
+      <tr><th>Costo de extracción</th><td>Alto (full scan del origen).</td><td class="ok">Bajo (delta por fecha).</td><td>Alto (full scan del origen).</td></tr>
+      <tr><th>Almacenamiento en BigQuery</th><td>Crece N filas por día.</td><td class="ok">Solo cambios reales.</td><td class="ok">Solo cambios reales.</td></tr>
+      <tr><th>Requisito</th><td>Ninguno.</td><td>Llave + <code>fecha_modificacion</code> confiable (se actualiza en todo cambio).</td><td>Llave (id_cliente).</td></tr>
+      <tr><th>Cuándo se sugiere</th><td>Sin llave.</td><td>Llave + fecha de modificación.</td><td>Llave sin fecha de modificación.</td></tr>
+      <tr><th>Guardas</th><td>Ninguna.</td><td>Una fila por llave (<code>QUALIFY ROW_NUMBER</code>); el hash excluye <code>fecha_modificacion</code>. Sin guarda de borrados.</td><td>Aborta con <code>ERROR()</code> si la extracción viene vacía o los borrados superan el 20 % de lo vigente.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="decision">
+  <h2>Árbol de decisión</h2>
+  <p class="lead small">Se evalúa por tabla, no por sistema.</p>
+  <div class="card tree">
+<svg viewBox="0 0 920 390" role="img" aria-label="Árbol de decisión: sin llave primaria snapshot; con llave y fecha de modificación confiable incremental; con llave y sin fecha cdc_hash">
+  <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker></defs>
+  <rect class="box" x="300" y="20" width="320" height="56" rx="10"/>
+  <text x="460" y="54" text-anchor="middle">¿La tabla tiene llave primaria?</text>
+
+  <path class="edge" d="M300 48 H145 V170" marker-end="url(#ar)"/>
+  <text class="lbl" x="210" y="40" text-anchor="middle">no</text>
+  <rect class="box res r-snap" x="40" y="170" width="210" height="60" rx="10"/>
+  <text class="res-t" x="145" y="206" text-anchor="middle">snapshot</text>
+  <text class="sm" x="145" y="252" text-anchor="middle">Sin llave no hay forma de</text>
+  <text class="sm" x="145" y="268" text-anchor="middle">comparar filas entre días.</text>
+
+  <path class="edge" d="M460 76 V150" marker-end="url(#ar)"/>
+  <text class="lbl" x="472" y="118">sí</text>
+  <rect class="box" x="300" y="150" width="320" height="56" rx="10"/>
+  <text x="460" y="184" text-anchor="middle">¿Fecha de modificación confiable?</text>
+
+  <path class="edge" d="M620 178 H700" marker-end="url(#ar)"/>
+  <text class="lbl" x="660" y="168" text-anchor="middle">sí</text>
+  <rect class="box res r-inc" x="700" y="140" width="190" height="76" rx="10"/>
+  <text class="res-t" x="795" y="174" text-anchor="middle">incremental</text>
+  <text class="sm" x="795" y="194" text-anchor="middle">delta por fecha</text>
+
+  <path class="edge dash" d="M795 216 V262" marker-end="url(#ar)"/>
+  <rect class="box" x="680" y="262" width="230" height="86" rx="10" stroke-dasharray="4 3"/>
+  <text class="sm" x="795" y="288" text-anchor="middle">+ conciliación periódica</text>
+  <text class="sm" x="795" y="306" text-anchor="middle">con cdc_hash, por los</text>
+  <text class="sm" x="795" y="324" text-anchor="middle">borrados físicos</text>
+
+  <path class="edge" d="M460 206 V290" marker-end="url(#ar)"/>
+  <text class="lbl" x="472" y="252">no</text>
+  <rect class="box res r-cdc" x="340" y="290" width="240" height="60" rx="10"/>
+  <text class="res-t" x="460" y="326" text-anchor="middle">cdc_hash</text>
+</svg>
+  </div>
+</section>
+
+<section id="hist-current">
+  <h2><code style="font-size:inherit">_hist</code> y <code style="font-size:inherit">_current</code></h2>
+  <p class="lead small">En incremental y cdc_hash conviven dos tablas con roles distintos.</p>
+  <div class="two">
+    <div class="card">
+      <h3><code>_hist</code>: bitácora</h3>
+      <ul>
+        <li>Solo cambios, con <code>op</code> y <code>row_hash</code>, por partición <code>information_date</code>.</li>
+        <li>Auditoría y trazabilidad: qué cambió, cuándo y desde qué carga.</li>
+        <li>Permite reconstruir el estado a cualquier fecha.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3><code>_current</code>: foto vigente para consumo</h3>
+      <ul>
+        <li>Última versión por llave, excluyendo <code>op = D</code>.</li>
+        <li>Es tabla, no vista: el costo de calcular la ventana se paga una vez por corrida, no en cada consulta.</li>
+        <li>Se recalcula completa desde <code>_hist</code> en cada corrida: idempotente y autocorregible (un reproceso de <code>_hist</code> se refleja solo).</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3>Estado a fecha X</h3>
+    <div class="small muted">Filtrar por <code>information_date</code> hace partition pruning; el resto es el mismo patrón que <code>_current</code>.</div>
+    <div class="sqlbar">
+      <label for="asof" class="small">Fecha X (datos de cdc_hash del simulador):</label>
+      <select id="asof"></select>
+    </div>
+    <div class="code" id="sql-asof" style="max-height:none"></div>
+    <div id="asof-out" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3>Vista SCD2 derivada</h3>
+    <div class="small muted">Vigencia por versión con <code>LEAD(information_date)</code>. <code>valido_hasta</code> nulo = versión vigente; las filas <code>op = D</code> cierran la vigencia anterior y no se muestran.</div>
+    <div class="code" id="sql-scd2" style="margin-top:10px;max-height:none"></div>
+    <div class="sqlbar"><button id="btn-scd2" aria-expanded="false">Calcular sobre los datos del simulador (cdc_hash)</button></div>
+    <div id="scd2-out"></div>
+  </div>
+</section>
+
+<section id="operacion">
+  <h2>Operación en producción</h2>
+  <p class="lead small">Reglas a respetar al operar tablas con carga CDC.</p>
+  <ul class="ops">
+    <li><b>Idempotencia por partición</b><code>insert_overwrite</code> reemplaza solo la partición <code>information_date</code> de la corrida; repetir el mismo día da el mismo resultado.</li>
+    <li><b>Reprocesar una fecha pasada</b>En CDC el estado depende de las particiones previas: al reprocesar la fecha T hay que reprocesar T+1, T+2, ... en orden.</li>
+    <li><b>Carga inicial en incremental</b>Trigger DAG w/ config con un <code>$FECHA_INFORMACION</code> antiguo, una sola vez; después, corridas normales con ventana de 1 día.</li>
+    <li><b>Primera corrida de cdc_hash</b>Todo entra con <code>op = I</code>; los conteos de <code>raw</code>, <code>_hist</code> y <code>_current</code> deben coincidir.</li>
+    <li><b>Guarda de cdc_hash</b>Aborta con <code>ERROR()</code> si la extracción viene vacía o si los borrados superan el 20 % de lo vigente. No se escribe la partición; se revisa el origen antes de reintentar.</li>
+    <li><b>Contrato para consumidores</b>Leer <code>_current</code> (o la consulta a fecha), nunca <code>_hist</code> como foto diaria: es un cambio de contrato frente a snapshot.</li>
+    <li><b>De snapshot a CDC en tabla productiva</b>Requiere aprobación del TL y full refresh o un modelo nuevo (<code>on_schema_change = 'fail'</code> impide mutar el esquema en caliente).</li>
+    <li><b>Costo</b>cdc_hash ahorra almacenamiento y cómputo en BigQuery, no extracción (sigue siendo full). Partición por <code>information_date</code> y clustering por la llave para partition pruning y joins baratos.</li>
+  </ul>
+</section>
+
+</main>
+
+<footer><div class="wrap" style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:0">
+  <span>Banco Falabella CO · DL 2.0 · documento técnico interno</span>
+  <span>20-nov-2026</span>
+</div></footer>
+
+<script>
+/* LOGIC-START */
+const STRATS=['snapshot','incremental','cdc_hash'];
+const INFO=['2026-11-18','2026-11-19','2026-11-20'];
+const WINDOW_DAYS=1;
+const GUARD_THRESHOLD=0.2;
+const ORIGIN=[
+  [ {id_cliente:101,ciudad:'Bogotá',segmento:'A',fecha_modificacion:'2026-11-10'},
+    {id_cliente:102,ciudad:'Cali',segmento:'B',fecha_modificacion:'2026-11-12'},
+    {id_cliente:103,ciudad:'Cali',segmento:'A',fecha_modificacion:'2026-11-14'},
+    {id_cliente:104,ciudad:'Pasto',segmento:'C',fecha_modificacion:'2026-11-15'},
+    {id_cliente:105,ciudad:'Neiva',segmento:'B',fecha_modificacion:'2026-11-17'} ],
+  [ {id_cliente:101,ciudad:'Medellín',segmento:'A',fecha_modificacion:'2026-11-19'},
+    {id_cliente:102,ciudad:'Cali',segmento:'B',fecha_modificacion:'2026-11-12'},
+    {id_cliente:103,ciudad:'Cali',segmento:'A',fecha_modificacion:'2026-11-14'},
+    {id_cliente:104,ciudad:'Pasto',segmento:'C',fecha_modificacion:'2026-11-15'},
+    {id_cliente:105,ciudad:'Neiva',segmento:'B',fecha_modificacion:'2026-11-17'},
+    {id_cliente:106,ciudad:'Tunja',segmento:'A',fecha_modificacion:'2026-11-19'} ],
+  [ {id_cliente:101,ciudad:'Medellín',segmento:'A',fecha_modificacion:'2026-11-19'},
+    {id_cliente:103,ciudad:'Cali',segmento:'B',fecha_modificacion:'2026-11-20'},
+    {id_cliente:104,ciudad:'Pasto',segmento:'C',fecha_modificacion:'2026-11-15'},
+    {id_cliente:105,ciudad:'Neiva',segmento:'B',fecha_modificacion:'2026-11-17'},
+    {id_cliente:106,ciudad:'Tunja',segmento:'A',fecha_modificacion:'2026-11-19'} ]
+];
+const DAY_NOTES=[
+  'Carga inicial: 5 filas en el origen.',
+  '101 cambia de ciudad a Medellín (fecha_modificacion = día 2). 106 es nueva (Tunja, A).',
+  '102 se borra físicamente en el origen. 103 cambia de segmento a B (fecha_modificacion = día 3).'
+];
+
+function sha256hex(str){
+  const bytes=new TextEncoder().encode(str);
+  const K=[],H=[];
+  for(let c=0,p=2;c<64;p++){
+    let prime=true; for(let d=2;d*d<=p;d++){ if(p%d===0){prime=false;break;} }
+    if(prime){ if(c<8) H[c]=(Math.pow(p,1/2)%1*4294967296)|0; K[c]=(Math.pow(p,1/3)%1*4294967296)|0; c++; }
+  }
+  const l=bytes.length, nb=((l+9+63)>>6)<<6, buf=new Uint8Array(nb);
+  buf.set(bytes); buf[l]=0x80;
+  const dv=new DataView(buf.buffer);
+  dv.setUint32(nb-4,(l*8)>>>0); dv.setUint32(nb-8,Math.floor(l*8/4294967296));
+  const rr=(x,n)=>(x>>>n)|(x<<(32-n)), w=new Array(64);
+  let h=H.slice();
+  for(let i=0;i<nb;i+=64){
+    for(let t=0;t<16;t++) w[t]=dv.getUint32(i+t*4);
+    for(let t=16;t<64;t++){
+      const s0=rr(w[t-15],7)^rr(w[t-15],18)^(w[t-15]>>>3), s1=rr(w[t-2],17)^rr(w[t-2],19)^(w[t-2]>>>10);
+      w[t]=(w[t-16]+s0+w[t-7]+s1)|0;
+    }
+    let [a,b,c,d,e,f,g,hh]=h;
+    for(let t=0;t<64;t++){
+      const S1=rr(e,6)^rr(e,11)^rr(e,25), ch=(e&f)^(~e&g), t1=(hh+S1+ch+K[t]+w[t])|0;
+      const S0=rr(a,2)^rr(a,13)^rr(a,22), mj=(a&b)^(a&c)^(b&c), t2=(S0+mj)|0;
+      hh=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0;
+    }
+    h=[(h[0]+a)|0,(h[1]+b)|0,(h[2]+c)|0,(h[3]+d)|0,(h[4]+e)|0,(h[5]+f)|0,(h[6]+g)|0,(h[7]+hh)|0];
+  }
+  return h.map(x=>(x>>>0).toString(16).padStart(8,'0')).join('');
+}
+function addDays(iso,n){ const t=new Date(iso+'T00:00:00Z'); t.setUTCDate(t.getUTCDate()+n); return t.toISOString().slice(0,10); }
+function originDay(d){ return ORIGIN[d-1].map(r=>Object.assign({},r)); }
+/* hash sobre columnas de negocio; fecha_modificacion (control) queda fuera */
+function hashRow(r){ return sha256hex(JSON.stringify({id_cliente:r.id_cliente,ciudad:r.ciudad,segmento:r.segmento})); }
+function latestPerKey(rows){ const m=new Map(); rows.forEach(r=>m.set(r.id_cliente,r)); return m; }  /* rows en orden cronologico */
+
+function run(strategy){
+  const hist=[]; const days=[]; let seq=0;
+  for(let d=1; d<=3; d++){
+    const info=INFO[d-1], src=originDay(d), winFrom=addDays(info,-WINDOW_DAYS);
+    const initial=(d===1);
+    let extracted=src;
+    if(strategy==='incremental' && !initial) extracted=src.filter(r=>r.fecha_modificacion>=winFrom);
+    let written=[], guard=null, aborted=false, deduped=extracted.length;
+    if(strategy==='snapshot'){
+      written=extracted.map(r=>({information_date:info,id_cliente:r.id_cliente,ciudad:r.ciudad,segmento:r.segmento,fecha_modificacion:r.fecha_modificacion,op:null,row_hash:null,_seq:seq++}));
+    } else {
+      let fuente=extracted;
+      if(strategy==='incremental'){ /* QUALIFY ROW_NUMBER() ... ORDER BY fecha_modificacion DESC = 1 */
+        const m=new Map();
+        extracted.forEach(r=>{ const p=m.get(r.id_cliente); if(!p||r.fecha_modificacion>=p.fecha_modificacion) m.set(r.id_cliente,r); });
+        fuente=[...m.values()]; deduped=fuente.length;
+      }
+      const fh=fuente.map(r=>Object.assign({},r,{row_hash:hashRow(r)}));
+      const prev=hist.filter(h=>h.information_date<info);
+      const estado=[...latestPerKey(prev).values()].filter(e=>e.op!=='D');
+      const estMap=new Map(estado.map(e=>[e.id_cliente,e]));
+      const cambios=[];
+      fh.forEach(f=>{ const e=estMap.get(f.id_cliente);
+        if(!e) cambios.push(Object.assign({},f,{op:'I'}));
+        else if(e.row_hash!==f.row_hash) cambios.push(Object.assign({},f,{op:'U'})); });
+      if(strategy==='cdc_hash'){
+        const fIds=new Set(fh.map(f=>f.id_cliente));
+        estado.forEach(e=>{ if(!fIds.has(e.id_cliente)) cambios.push({id_cliente:e.id_cliente,ciudad:e.ciudad,segmento:e.segmento,fecha_modificacion:e.fecha_modificacion,row_hash:e.row_hash,op:'D'}); });
+        const n_borrados=cambios.filter(c=>c.op==='D').length;
+        guard={n_fuente:fh.length,n_estado:estado.length,n_borrados,
+               umbral:estado.length*GUARD_THRESHOLD,
+               pct:estado.length?n_borrados/estado.length:0,
+               aplica:estado.length>0};
+        guard.aborta=guard.aplica && (guard.n_fuente===0 || n_borrados>guard.umbral);
+        aborted=guard.aborta;
+      }
+      cambios.sort((a,b)=>a.id_cliente-b.id_cliente);
+      if(!aborted) written=cambios.map(c=>({information_date:info,id_cliente:c.id_cliente,ciudad:c.ciudad,segmento:c.segmento,fecha_modificacion:c.fecha_modificacion,op:c.op,row_hash:c.row_hash,_seq:seq++}));
+    }
+    written.forEach(w=>hist.push(w));
+    let current=null;
+    if(strategy!=='snapshot'){
+      current=[...latestPerKey(hist).values()].filter(r=>r.op!=='D').sort((a,b)=>a.id_cliente-b.id_cliente);
+    }
+    const lastPartition=hist.filter(h=>h.information_date===info);
+    const originIds=new Set(src.map(r=>r.id_cliente));
+    const ghosts=current?current.filter(r=>!originIds.has(r.id_cliente)).map(r=>r.id_cliente):[];
+    days.push({d,info,origin:src,extracted,file:extracted,written,deduped,guard,aborted,
+               hist:hist.slice(),current,lastPartition,ghosts,initial,winFrom});
+  }
+  return days;
+}
+function scd2(histRows){
+  const by=new Map();
+  histRows.slice().sort((a,b)=>a._seq-b._seq).forEach(r=>{ if(!by.has(r.id_cliente)) by.set(r.id_cliente,[]); by.get(r.id_cliente).push(r); });
+  const out=[];
+  by.forEach(list=>list.forEach((r,i)=>{
+    if(r.op==='D') return;
+    out.push({id_cliente:r.id_cliente,ciudad:r.ciudad,segmento:r.segmento,valido_desde:r.information_date,
+              valido_hasta:i+1<list.length?list[i+1].information_date:null});
+  }));
+  return out.sort((a,b)=>a.id_cliente-b.id_cliente||(a.valido_desde<b.valido_desde?-1:1));
+}
+function asOf(histRows,x){
+  const m=latestPerKey(histRows.filter(r=>r.information_date<=x).sort((a,b)=>a._seq-b._seq));
+  return [...m.values()].filter(r=>r.op!=='D').sort((a,b)=>a.id_cliente-b.id_cliente);
+}
+/* LOGIC-END */
+
+/* ---------- UI ---------- */
+if(typeof document!=='undefined'){
+const RUNS={}; STRATS.forEach(s=>RUNS[s]=run(s));
+const st={strategy:'snapshot',day:1,tab:'hist',scd2:false};
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const pct=x=>(x*100).toFixed(1).replace('.',',')+' %';
+const dec=x=>String(x).replace('.',',');
+const hh=h=>h?h.slice(0,6):'';
+
+function table(cols,rows,rowCls){
+  return '<div class="tw"><table class="t"><thead><tr>'+cols.map(c=>'<th>'+esc(c.h)+'</th>').join('')+'</tr></thead><tbody>'+
+    rows.map(r=>'<tr class="'+(rowCls?rowCls(r):'')+'">'+cols.map(c=>'<td>'+c.f(r)+'</td>').join('')+'</tr>').join('')+
+    '</tbody></table></div>';
+}
+const opBadge=op=>op?'<span class="badge b-'+op+'">'+op+'</span>':'';
+const BASE=[{h:'id_cliente',f:r=>r.id_cliente},{h:'ciudad',f:r=>esc(r.ciudad)},{h:'segmento',f:r=>r.segmento}];
+const WITHFM=BASE.concat([{h:'fecha_modificacion',f:r=>r.fecha_modificacion}]);
+
+/* origen */
+function renderOrigin(){
+  const R=RUNS[st.strategy][st.day-1], prev=st.day>1?RUNS[st.strategy][st.day-2].origin:[];
+  const pm=new Map(prev.map(r=>[r.id_cliente,r])), cur=new Set(R.origin.map(r=>r.id_cliente));
+  const rows=R.origin.map(r=>{const p=pm.get(r.id_cliente);
+    let tag=''; if(st.day>1){ if(!p) tag='nueva'; else if(p.ciudad!==r.ciudad||p.segmento!==r.segmento) tag='cambió'; }
+    return Object.assign({_tag:tag,_gone:false},r); });
+  prev.filter(p=>!cur.has(p.id_cliente)).forEach(p=>rows.push(Object.assign({_tag:'borrada',_gone:true},p)));
+  rows.sort((a,b)=>a.id_cliente-b.id_cliente);
+  const cols=WITHFM.concat([{h:'cambio',f:r=>r._tag?'<span class="badge '+(r._tag==='borrada'?'b-D':r._tag==='nueva'?'b-I':'b-U')+'">'+r._tag+'</span>':''}]);
+  $('#origen').innerHTML='<h3>Origen (Oracle) · día '+st.day+' · <span class="mono">'+R.info+'</span></h3><p class="scn-note">'+esc(DAY_NOTES[st.day-1])+'</p>'+
+    table(cols,rows,r=>r._gone?'gone':(r._tag?'new':''));
+}
+
+/* GCS */
+function panelGCS(R){
+  const ymd=R.info.replace(/-/g,''), f='<sistema>_cliente_'+ymd+'.csv';
+  let mode;
+  if(st.strategy==='incremental') mode=R.initial?'Carga inicial completa (<code>$FECHA_INFORMACION</code> antiguo, una sola vez).':'Solo filas con <code>fecha_modificacion</code> &ge; '+R.winFrom+' (ventana de '+WINDOW_DAYS+' día).';
+  else mode='Extracción completa de la tabla.';
+  const csv=['id_cliente,ciudad,segmento,fecha_modificacion'].concat(R.file.map(r=>[r.id_cliente,r.ciudad,r.segmento,r.fecha_modificacion].join(','))).join('\n');
+  return '<div class="card panel"><h3 class="ph">GCS <span>landing &rarr; raw</span></h3>'+
+    '<div class="path">'+esc('gs://<lnd_bucket>/'+f)+'</div>'+
+    '<div class="small" style="margin-bottom:4px"><span class="badge b-acc">'+R.file.length+' filas</span> '+mode+'</div>'+
+    '<div class="csv">'+esc(csv)+'</div>'+
+    '<div class="flow">carga a raw</div>'+
+    '<div class="path">'+esc('gs://<raw_bucket>/'+f)+'</div>'+
+    '<div class="callout warn"><b>Control de acceso.</b> En JDBC el CSV queda en claro en landing hasta la carga a raw: restringir acceso al bucket y aplicar retención/lifecycle corta.</div></div>';
+}
+
+/* BigQuery */
+function panelBQ(R){
+  const s=st.strategy, cdc=s!=='snapshot';
+  const hcols=[{h:'information_date',f:r=>r.information_date}].concat(BASE);
+  if(cdc){ hcols.push({h:'op',f:r=>opBadge(r.op)}); hcols.push({h:'row_hash',f:r=>hh(r.row_hash)}); }
+  const stats='<div class="stats">'+
+    '<div class="stat"><div class="n">'+R.extracted.length+'</div><div class="l">filas extraídas hoy</div></div>'+
+    '<div class="stat"><div class="n">'+R.written.length+'</div><div class="l">filas escritas hoy en _hist</div></div>'+
+    '<div class="stat"><div class="n">'+R.hist.length+'</div><div class="l">acumuladas en _hist</div></div></div>';
+  let skipNote='';
+  if(s==='incremental' && R.extracted.length>R.written.length)
+    skipNote='<div class="callout"><b>'+(R.extracted.length-R.written.length)+' fila(s) extraída(s) no se escriben.</b> Reaparecen por el solape de la ventana y su <code>row_hash</code> no cambió.</div>';
+  if(R.aborted) skipNote='<div class="callout bad"><b>Carga abortada por la guarda.</b> No se escribe la partición.</div>';
+  const raw='<div class="tblock"><div class="cap"><code>raw_&lt;sistema&gt;.cliente</code><span>cargado hoy · '+R.file.length+' filas</span></div>'+table(WITHFM,R.file)+'</div>';
+  const hist='<div class="tblock"><div class="cap"><code>std_&lt;dominio&gt;.&lt;sistema&gt;_cliente_hist</code><span>'+R.hist.length+' filas · fondo azul = escrito hoy</span></div>'+
+    table(hcols,R.hist,r=>r.information_date===R.info?'new':'')+'</div>';
+  let cur;
+  if(!cdc){
+    cur='<div class="callout"><b>No hay <code>_current</code>.</b> El último estado es la última partición de <code>_hist</code> (<code>information_date = '+R.info+'</code>, '+R.lastPartition.length+' filas).</div>';
+  } else {
+    const cc=[{h:'id_cliente',f:r=>r.id_cliente},{h:'ciudad',f:r=>esc(r.ciudad)},{h:'segmento',f:r=>r.segmento},{h:'vigente desde',f:r=>r.information_date},{h:'',f:r=>R.ghosts.includes(r.id_cliente)?'<span class="badge b-D">no existe en origen</span>':''}];
+    cur='<div class="tblock"><div class="cap"><code>std_&lt;dominio&gt;.&lt;sistema&gt;_cliente_current</code><span>'+R.current.length+' filas · origen: '+R.origin.length+'</span></div>'+
+      table(cc,R.current,r=>R.ghosts.includes(r.id_cliente)?'ghost':'')+'</div>';
+  }
+  return '<div class="card panel"><h3 class="ph">BigQuery <span>raw &rarr; std</span></h3>'+stats+skipNote+raw+hist+cur+'</div>';
+}
+
+/* dbt */
+const L=(t,k)=>({t,k:k||''}); /* k: '' comun, 'i' solo incremental, 'c' solo cdc_hash, 's' snapshot */
+const SQL_SNAP=[
+ L("{% set partitions_to_replace = [var(\"information_date\")] %}"),
+ L("{{ config("),
+ L("    materialized = 'incremental',"),
+ L("    incremental_strategy = 'insert_overwrite',"),
+ L("    partition_by = {'field': 'information_date', 'data_type': 'date'},"),
+ L("    partitions = partitions_to_replace,"),
+ L("    labels = {'load_strategy': 'snapshot', 'update_type': '<update_type de la extracción>'}"),
+ L(") }}"),
+ L(""),
+ L("SELECT",'s'),
+ L("    s.*,",'s'),
+ L("    DATE({{ var(\"information_date\") }}) AS information_date,",'s'),
+ L("    -- extraction_date, execution_dttm, source:",'s'),
+ L("    CURRENT_DATETIME('America/Bogota') AS execution_dttm,",'s'),
+ L("    ...",'s'),
+ L("FROM {{ source('raw_<sistema>', 'cliente') }} s",'s'),
+ L("{% if is_incremental() %}",'s'),
+ L("WHERE information_date IN (...)  -- particiones a reemplazar",'s'),
+ L("{% endif %}",'s')
+];
+const SQL_CDC=[
+ L("{% set partitions_to_replace = [var(\"information_date\")] %}"),
+ L("{{ config("),
+ L("    materialized = 'incremental',"),
+ L("    incremental_strategy = 'insert_overwrite',"),
+ L("    partition_by = {'field': 'information_date', 'data_type': 'date'},"),
+ L("    partitions = partitions_to_replace,"),
+ L("    cluster_by = ['id_cliente'],"),
+ L("    on_schema_change = 'fail',"),
+ L("    labels = {'load_strategy': '{{S}}', 'update_type': 'incremental'}"),
+ L(") }}"),
+ L(""),
+ L("WITH fuente AS (",''),
+ L("    SELECT ... FROM {{ source('raw_<sistema>', 'cliente') }}"),
+ L("    -- solo incremental: una fila por llave, la más reciente",'i'),
+ L("    WHERE TRUE",'i'),
+ L("    QUALIFY ROW_NUMBER() OVER (PARTITION BY id_cliente",'i'),
+ L("        ORDER BY fecha_modificacion DESC) = 1",'i'),
+ L("),"),
+ L("fuente_h AS ("),
+ L("    SELECT f.*,"),
+ L("        TO_HEX(SHA256(TO_JSON_STRING(STRUCT("),
+ L("            id_cliente, ciudad, segmento  -- sin fecha_modificacion (control)",'i'),
+ L("            id_cliente, ciudad, segmento  -- columnas de negocio, sin control",'c'),
+ L("        )))) AS row_hash"),
+ L("    FROM fuente f"),
+ L("),"),
+ L("estado AS (  -- última versión vigente por llave antes de la fecha"),
+ L("    SELECT * EXCEPT (rn) FROM ("),
+ L("        SELECT t.*, ROW_NUMBER() OVER (PARTITION BY id_cliente"),
+ L("            ORDER BY information_date DESC, execution_dttm DESC) AS rn"),
+ L("        FROM {{ this }} t"),
+ L("        WHERE information_date < DATE({{ var(\"information_date\") }}))"),
+ L("    WHERE rn = 1 AND op != 'D'"),
+ L("),"),
+ L("cambios AS ("),
+ L("    SELECT f.*, IF(e.row_hash IS NULL, 'I', 'U') AS op"),
+ L("    FROM fuente_h f LEFT JOIN estado e USING (id_cliente)"),
+ L("    WHERE e.row_hash IS NULL OR e.row_hash != f.row_hash"),
+ L("    -- solo cdc_hash: borrados",'c'),
+ L("    UNION ALL",'c'),
+ L("    SELECT e.<columnas>, e.row_hash, 'D' AS op",'c'),
+ L("    FROM estado e LEFT JOIN fuente_h f USING (id_cliente)",'c'),
+ L("    WHERE f.row_hash IS NULL",'c'),
+ L(")",'i'),
+ L("),",'c'),
+ L("control AS (  -- solo cdc_hash",'c'),
+ L("    SELECT (SELECT COUNT(*) FROM fuente_h) AS n_fuente,",'c'),
+ L("           (SELECT COUNT(*) FROM estado) AS n_estado,",'c'),
+ L("           (SELECT COUNT(*) FROM cambios WHERE op = 'D') AS n_borrados",'c'),
+ L(")",'c'),
+ L("SELECT c.*,"),
+ L("    DATE({{ var(\"information_date\") }}) AS information_date,"),
+ L("    ...  -- extraction_date, execution_dttm, source"),
+ L("FROM cambios c"),
+ L("CROSS JOIN control k",'c'),
+ L("WHERE IF(k.n_estado > 0 AND (k.n_fuente = 0 OR k.n_borrados > k.n_estado * 0.2),",'c'),
+ L("         ERROR('cdc: extracción vacía o borrados sobre el umbral; se aborta'), TRUE)",'c')
+];
+const SQL_CUR=[
+ L("{{ config("),
+ L("    materialized = 'table',"),
+ L("    cluster_by = ['id_cliente']"),
+ L(") }}"),
+ L(""),
+ L("SELECT * EXCEPT (rn, op)"),
+ L("FROM ("),
+ L("    SELECT h.*,"),
+ L("        ROW_NUMBER() OVER (PARTITION BY id_cliente"),
+ L("            ORDER BY information_date DESC, execution_dttm DESC) AS rn"),
+ L("    FROM {{ ref('<sistema>_cliente_hist') }} h"),
+ L(")"),
+ L("WHERE rn = 1 AND op != 'D'")
+];
+function fmtLine(t){
+  let e=esc(t), cm='';
+  const i=e.indexOf('--'); if(i>=0){ cm='<span class="cm">'+e.slice(i)+'</span>'; e=e.slice(0,i); }
+  e=e.replace(/(\{\{.*?\}\}|\{%.*?%\})/g,'<span class="jn">$1</span>');
+  return e+cm;
+}
+function codeBlock(lines,selKey){ /* selKey: 'i' | 'c' | 's' */
+  return '<div class="code">'+lines.map(l=>{
+    let cls='ln'; if(l.k){ cls+= (l.k===selKey)?' hl':' dim'; }
+    return '<span class="'+cls+'">'+fmtLine(l.t.replace('{{S}}',st.strategy))+'</span>';
+  }).join('')+'</div>';
+}
+function panelDbt(R){
+  const s=st.strategy, cdc=s!=='snapshot';
+  if(!cdc && st.tab==='cur') st.tab='hist';
+  const key=s==='snapshot'?'s':(s==='incremental'?'i':'c');
+  const tabs='<div class="tabs" role="tablist">'+
+    [['hist','_hist'],['cur','_current'],['yaml','YAML']].map(t=>'<button role="tab" data-tab="'+t[0]+'" aria-selected="'+(st.tab===t[0])+'"'+(t[0]==='cur'&&!cdc?' disabled title="snapshot no tiene _current"':'')+'>'+t[1]+'</button>').join('')+'</div>';
+  const upd=cdc?'incremental':'&lt;de la extracción&gt;';
+  const chips='<div class="chips"><span class="chip">load_strategy: <b>'+s+'</b></span><span class="chip">update_type: <b>'+upd+'</b></span></div>';
+  let body, legend='';
+  if(st.tab==='hist'){
+    body=codeBlock(cdc?SQL_CDC:SQL_SNAP,key);
+    legend='<div class="legend"><span><i style="background:var(--hl)"></i>aplica a '+s+'</span><span><i style="opacity:.4;background:var(--surface)"></i>aplica a otra estrategia</span></div>';
+    if(cdc && s==='incremental') legend+='<div class="small muted" style="margin-top:6px">El hash excluye también <code>fecha_modificacion</code>: una fila cambia solo si cambió su contenido. No existe <code>op = D</code>.</div>';
+    if(!cdc) legend+='<div class="small muted" style="margin-top:6px">Sin <code>cluster_by</code> ni <code>on_schema_change</code>; el SELECT toma todo el source.</div>';
+  } else if(st.tab==='cur'){
+    body=codeBlock(SQL_CUR,'');
+    legend='<div class="small muted" style="margin-top:6px">Tabla (no vista), recalculada completa desde <code>_hist</code> en cada corrida.</div>';
+  } else {
+    const q=['SELECT id_cliente, ciudad, segmento, fecha_modificacion','FROM {<SISTEMA>_OWNER_DB}.CLIENTE'];
+    const qs=q.map(x=>({t:'      '+x,k:''}));
+    if(s==='incremental') qs.push({t:"      WHERE fecha_modificacion >= TO_DATE('$FECHA_INFORMACION', 'YYYY-MM-DD') - 1",k:'i'});
+    const lines=[L('gcp:'),L('  bigquery:'),L('    trf_steps:'),L("    - dbt_model: '<sistema>_cliente_hist'")];
+    if(cdc) lines.push(L("    - dbt_model: '<sistema>_cliente_current'"));
+    lines.push(L('extractor:'),L('  env:'),L("  - key: 'source.query_string'"),L('    value: |'));
+    qs.forEach(x=>lines.push(x));
+    body=codeBlock(lines,'i');
+    legend='<div class="small muted" style="margin-top:6px">Fragmento del YAML de ingesta. '+(s==='incremental'?'La ventana filtra en Oracle; en la carga inicial se dispara con un <code>$FECHA_INFORMACION</code> antiguo.':s==='cdc_hash'?'Query completa: la diferencia se calcula en BigQuery.':'Query completa; solo se materializa <code>_hist</code>.')+'</div>';
+  }
+  return '<div class="card panel"><h3 class="ph">dbt <span>modelo + YAML</span></h3>'+chips+tabs+body+legend+'</div>';
+}
+
+function renderPanels(){
+  const R=RUNS[st.strategy][st.day-1];
+  $('#panels').innerHTML=panelGCS(R)+panelBQ(R)+panelDbt(R);
+  document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>{st.tab=b.dataset.tab;renderPanels();}));
+}
+
+/* grafica */
+const COL={snapshot:'var(--c-snap)',incremental:'var(--c-inc)',cdc_hash:'var(--c-cdc)'};
+function renderChart(){
+  const W=560,H=250,pl=34,pr=10,pt=24,pb=44, iw=W-pl-pr, ih=H-pt-pb;
+  const vals=STRATS.map(s=>RUNS[s].map(r=>r.hist.length)), max=Math.max(...vals.flat());
+  const ymax=Math.ceil(max/4)*4, gw=iw/3, bw=Math.min(34,(gw-20)/3);
+  let g='';
+  for(let t=0;t<=4;t++){ const v=ymax/4*t, y=pt+ih-ih*v/ymax;
+    g+='<line class="axis" x1="'+pl+'" x2="'+(W-pr)+'" y1="'+y+'" y2="'+y+'" '+(t?'stroke-dasharray="2 3"':'')+'/><text x="'+(pl-6)+'" y="'+(y+4)+'" text-anchor="end">'+v+'</text>'; }
+  for(let d=0;d<3;d++){
+    const x0=pl+gw*d;
+    if(d+1===st.day) g+='<rect class="band" x="'+x0+'" y="'+pt+'" width="'+gw+'" height="'+ih+'" rx="6"/>';
+  }
+  for(let d=0;d<3;d++){
+    const x0=pl+gw*d, gx=x0+(gw-bw*3-6)/2;
+    STRATS.forEach((s,i)=>{
+      const v=vals[i][d], h=ih*v/ymax, x=gx+i*(bw+3), y=pt+ih-h, sel=s===st.strategy;
+      g+='<rect x="'+x+'" y="'+y+'" width="'+bw+'" height="'+h+'" rx="3" fill="'+COL[s]+'" opacity="'+(sel?1:.35)+'"><title>'+s+' · día '+(d+1)+': '+v+' filas</title></rect>'+
+         '<text class="val" x="'+(x+bw/2)+'" y="'+(y-4)+'" text-anchor="middle" '+(sel?'font-weight="700"':'')+'>'+v+'</text>';
+    });
+    g+='<text x="'+(x0+gw/2)+'" y="'+(H-pb+16)+'" text-anchor="middle" '+(d+1===st.day?'style="fill:var(--text);font-weight:600"':'')+'>Día '+(d+1)+' · '+INFO[d].slice(5)+'</text>';
+  }
+  const lg=STRATS.map((s,i)=>'<rect x="'+(pl+i*130)+'" y="'+(H-12)+'" width="10" height="10" rx="2" fill="'+COL[s]+'" opacity="'+(s===st.strategy?1:.35)+'"/><text x="'+(pl+i*130+15)+'" y="'+(H-3)+'" '+(s===st.strategy?'style="fill:var(--text);font-weight:600"':'')+'>'+s+'</text>').join('');
+  $('#chart').innerHTML='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Filas acumuladas en _hist por día y estrategia">'+g+lg+'</svg>';
+}
+
+/* detecta */
+function detectCards(){
+  const day=st.day, out=[];
+  STRATS.forEach(s=>{
+    const R=RUNS[s][day-1], prev=day>1?RUNS[s][day-2]:null; let html='', risk=false, title=s;
+    const cnt=op=>R.written.filter(w=>w.op===op).map(w=>w.id_cliente);
+    const fmt=a=>a.length?a.join(', '):'ninguna';
+    if(s==='snapshot'){
+      const pIds=prev?new Set(prev.origin.map(r=>r.id_cliente)):new Set(), cIds=new Set(R.origin.map(r=>r.id_cliente));
+      const gone=[...pIds].filter(i=>!cIds.has(i));
+      html='<p>Foto completa: <b>'+R.written.length+'</b> filas en la partición del día. No guarda <code>op</code>: los cambios se infieren comparando particiones.</p>';
+      html+= gone.length? '<p>El borrado de <b>'+gone.join(', ')+'</b> no se marca: simplemente no viene en la foto de hoy.</p>' : '<p>Sin filas ausentes respecto a la partición anterior.</p>';
+    } else if(s==='incremental'){
+      html='<p>Detecta altas y cambios: <span class="badge b-I">I</span> '+fmt(cnt('I'))+' · <span class="badge b-U">U</span> '+fmt(cnt('U'))+'. Los borrados físicos no son visibles.</p>';
+      if(R.ghosts.length){ risk=true;
+        html+='<div class="callout bad"><b>Riesgo: el borrado de '+R.ghosts.join(', ')+' NO se detecta.</b> La fila sigue vigente en <code>_current</code> ('+R.current.length+' filas) aunque el origen ya solo tiene '+R.origin.length+'. Mitigación: conciliación periódica con cdc_hash.</div>'; }
+    } else {
+      html='<p><span class="badge b-I">I</span> '+fmt(cnt('I'))+' · <span class="badge b-U">U</span> '+fmt(cnt('U'))+' · <span class="badge b-D">D</span> '+fmt(cnt('D'))+'.</p>';
+      if(cnt('D').length) html+='<p>El borrado de <b>'+cnt('D').join(', ')+'</b> queda registrado como <code>op = D</code> y sale de <code>_current</code>.</p>';
+      const g=R.guard;
+      if(!g.aplica) html+='<div class="guard">guarda: n_estado = 0 (carga inicial) &rarr; no aplica; todo entra con op = I</div>';
+      else html+='<div class="guard">guarda de borrados<br>n_fuente = '+g.n_fuente+' · n_estado = '+g.n_estado+' · n_borrados = '+g.n_borrados+'<br>'+
+        'umbral = n_estado &times; 0,2 = '+dec(g.umbral.toFixed(1))+'<br>'+g.n_borrados+' / '+g.n_estado+' = '+pct(g.pct)+' '+(g.pct<0.2||!g.aborta?'&lt;':'&ge;')+' 20 % &rarr; <b>'+(g.aborta?'ABORTA (ERROR)':'la carga procede')+'</b></div>';
+    }
+    out.push('<div class="dcard'+(s===st.strategy?' sel':'')+'"><h4><span style="color:'+COL[s]+'">&#9632;</span>'+title+(s===st.strategy?' <span class="badge b-acc">seleccionada</span>':'')+'</h4>'+html+'</div>');
+  });
+  $('#det').innerHTML=out.join('');
+}
+
+/* seccion 5 */
+const SQL_ASOF=[
+ "SELECT * EXCEPT (rn, op)","FROM (","  SELECT h.*,","    ROW_NUMBER() OVER (PARTITION BY id_cliente",
+ "      ORDER BY information_date DESC, execution_dttm DESC) AS rn",
+ "  FROM `<proyecto>.std_<dominio>.<sistema>_cliente_hist` h",
+ "  WHERE information_date <= DATE '{{X}}'  -- fecha X: partition pruning",")","WHERE rn = 1 AND op != 'D'"];
+const SQL_SCD2=[
+ "SELECT id_cliente, ciudad, segmento,","       information_date AS valido_desde,","       valido_hasta   -- NULL = vigente","FROM (",
+ "  SELECT h.*,","    LEAD(information_date) OVER (PARTITION BY id_cliente",
+ "      ORDER BY information_date, execution_dttm) AS valido_hasta",
+ "  FROM `<proyecto>.std_<dominio>.<sistema>_cliente_hist` h",")","WHERE op != 'D'"];
+const fullCdc=RUNS.cdc_hash[2].hist;
+function renderAsOf(){
+  const x=$('#asof').value;
+  $('#sql-asof').innerHTML=SQL_ASOF.map(t=>'<span class="ln">'+fmtLine(t.replace('{{X}}',x))+'</span>').join('');
+  const rows=asOf(fullCdc,x);
+  $('#asof-out').innerHTML='<div class="small muted" style="margin-bottom:4px">Resultado a '+x+': '+rows.length+' filas</div>'+
+    table([{h:'id_cliente',f:r=>r.id_cliente},{h:'ciudad',f:r=>esc(r.ciudad)},{h:'segmento',f:r=>r.segmento},{h:'versión de',f:r=>r.information_date}],rows);
+}
+function renderScd2(){
+  $('#sql-scd2').innerHTML=SQL_SCD2.map(t=>'<span class="ln">'+fmtLine(t)+'</span>').join('');
+  const b=$('#btn-scd2'); b.setAttribute('aria-expanded',st.scd2);
+  b.textContent=st.scd2?'Ocultar resultado':'Calcular sobre los datos del simulador (cdc_hash)';
+  if(!st.scd2){ $('#scd2-out').innerHTML=''; return; }
+  const rows=scd2(fullCdc);
+  $('#scd2-out').innerHTML='<div class="small muted" style="margin:6px 0 4px">cdc_hash, hasta '+INFO[2]+': '+rows.length+' versiones (— = vigente)</div>'+
+    table([{h:'id_cliente',f:r=>r.id_cliente},{h:'ciudad',f:r=>esc(r.ciudad)},{h:'segmento',f:r=>r.segmento},{h:'valido_desde',f:r=>r.valido_desde},{h:'valido_hasta',f:r=>r.valido_hasta||'—'}],rows,r=>r.valido_hasta?'':'new');
+}
+
+/* controles */
+function renderControls(){
+  $('#seg').innerHTML=STRATS.map(s=>'<button data-s="'+s+'" aria-pressed="'+(st.strategy===s)+'">'+s+'</button>').join('');
+  $('#pills').innerHTML=INFO.map((d,i)=>'<button data-d="'+(i+1)+'" aria-pressed="'+(st.day===i+1)+'">Día '+(i+1)+(i===0?' · inicial':'')+'</button>').join('');
+  $('#prev').disabled=st.day<=1; $('#next').disabled=st.day>=3;
+  document.querySelectorAll('#seg button').forEach(b=>b.onclick=()=>{st.strategy=b.dataset.s;render();});
+  document.querySelectorAll('#pills button').forEach(b=>b.onclick=()=>{st.day=+b.dataset.d;render();});
+}
+function render(){ renderControls(); renderOrigin(); renderPanels(); renderChart(); detectCards(); }
+$('#prev').onclick=()=>{ if(st.day>1){st.day--;render();} };
+$('#next').onclick=()=>{ if(st.day<3){st.day++;render();} };
+document.addEventListener('keydown',e=>{
+  if(e.altKey||e.ctrlKey||e.metaKey) return;
+  const t=e.target&&e.target.tagName; if(t==='SELECT'||t==='INPUT'||t==='TEXTAREA') return;
+  if(e.key==='ArrowLeft'&&st.day>1){st.day--;render();e.preventDefault();}
+  if(e.key==='ArrowRight'&&st.day<3){st.day++;render();e.preventDefault();}
+});
+$('#asof').innerHTML=INFO.map(d=>'<option value="'+d+'"'+(d===INFO[1]?' selected':'')+'>'+d+'</option>').join('');
+$('#asof').onchange=renderAsOf;
+$('#btn-scd2').onclick=()=>{st.scd2=!st.scd2;renderScd2();};
+render(); renderAsOf(); renderScd2();
+window.__sim={RUNS,st,render};
+}
+if(typeof module!=='undefined') module.exports={run,scd2,asOf,sha256hex,ORIGIN,INFO};
+</script>
+</body>
+</html>

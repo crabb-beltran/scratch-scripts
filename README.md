@@ -20,3 +20,7 @@ python ../../scratch/scripts/comparar_vars_dbt.py dbt_project.yml origin/main
 ```
 
 > `scripts/in/` y `scripts/out/` están en `.gitignore`: contienen valores del cliente, catálogos y salidas sensibles. Nunca se versionan.
+
+## Docs
+
+- `docs/estrategias-carga.html`: explicador interactivo de `snapshot` / `incremental` / `cdc_hash` (simulador, comparativa, árbol de decisión, `_hist` vs `_current`, operación). Abrir local en el navegador.
