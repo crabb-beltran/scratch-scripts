@@ -26,3 +26,7 @@ git show origin/co-dev:dbt_project.yml > /tmp/ref.yml && python ../../scratch/sc
 ## Docs
 
 - `docs/estrategias-carga.html`: explicador interactivo de `snapshot` / `incremental` / `cdc_hash` (simulador, comparativa, árbol de decisión, `_hist` vs `_current`, operación). Abrir local en el navegador.
+
+## Snippets
+
+- `snippets/vaciar_data_tests_por_confirmar.txt`: deja `data_tests: []` en los bloques de `schema.yml` que contienen `POR_CONFIRMAR` (data-models), conservando EOL; incluye los checks posteriores.

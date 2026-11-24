@@ -1,0 +1,25 @@
+# Desde la raíz de data-models: deja `data_tests: []` en todo bloque data_tests de schema.yml que contenga POR_CONFIRMAR.
+# Conserva CRLF/LF por archivo. Después: contar archivos con POR_CONFIRMAR y comparar diff con/sin EOL.
+python - <<'EOF'
+import pathlib, re
+n = 0
+for p in pathlib.Path("datope_bfaco/models").rglob("schema.yml"):
+    raw = p.read_bytes(); eol = b"\r\n" if b"\r\n" in raw else b"\n"
+    L = raw.decode("utf-8").replace("\r\n", "\n").split("\n")
+    out, i, hit = [], 0, False
+    while i < len(L):
+        m = re.match(r"^(\s*)data_tests:\s*$", L[i])
+        if m:
+            ind, j = len(m.group(1)), i + 1
+            while j < len(L) and (not L[j].strip() or len(L[j]) - len(L[j].lstrip()) > ind or L[j].lstrip().startswith("- ")) and not re.match(rf"^\s{{{ind}}}\S", L[j]):
+                j += 1
+            if any("POR_CONFIRMAR" in x for x in L[i:j]):
+                out.append(" " * ind + "data_tests: []"); i, hit = j, True; continue
+        out.append(L[i]); i += 1
+    if hit:
+        p.write_bytes("\n".join(out).encode("utf-8").replace(b"\n", eol)); n += 1
+print("schema.yml ajustados:", n)
+EOF
+grep -rl POR_CONFIRMAR datope_bfaco/models | wc -l
+git diff --stat --ignore-cr-at-eol | tail -1
+git diff --stat | tail -1
