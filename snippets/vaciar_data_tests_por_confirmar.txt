@@ -1,5 +1,7 @@
-# Desde la raíz de data-models: deja `data_tests: []` en todo bloque data_tests de schema.yml que contenga POR_CONFIRMAR.
-# Conserva CRLF/LF por archivo. Después: contar archivos con POR_CONFIRMAR y comparar diff con/sin EOL.
+# repo: datope-fif-bfaco-data-models · rama feature/DL2-FIFDF-89514-ingesta-bup
+# Desde la raíz de data-models: deja `data_tests: []` en todo bloque data_tests de schema.yml que contenga POR_CONFIRMAR
+# (también listas al mismo nivel que la llave). Conserva CRLF/LF por archivo. Después: contar archivos con POR_CONFIRMAR
+# y verificar que el diff no tenga cambios solo de EOL.
 python - <<'EOF'
 import pathlib, re
 n = 0
@@ -11,7 +13,10 @@ for p in pathlib.Path("datope_bfaco/models").rglob("schema.yml"):
         m = re.match(r"^(\s*)data_tests:\s*$", L[i])
         if m:
             ind, j = len(m.group(1)), i + 1
-            while j < len(L) and (not L[j].strip() or len(L[j]) - len(L[j].lstrip()) > ind or L[j].lstrip().startswith("- ")) and not re.match(rf"^\s{{{ind}}}\S", L[j]):
+            while j < len(L):
+                s = L[j]; k = len(s) - len(s.lstrip())
+                if s.strip() and (k < ind or (k == ind and not s.lstrip().startswith("- "))):
+                    break
                 j += 1
             if any("POR_CONFIRMAR" in x for x in L[i:j]):
                 out.append(" " * ind + "data_tests: []"); i, hit = j, True; continue
@@ -21,5 +26,4 @@ for p in pathlib.Path("datope_bfaco/models").rglob("schema.yml"):
 print("schema.yml ajustados:", n)
 EOF
 grep -rl POR_CONFIRMAR datope_bfaco/models | wc -l
-git diff --stat --ignore-cr-at-eol | tail -1
-git diff --stat | tail -1
+diff <(git diff --numstat) <(git diff --numstat --ignore-cr-at-eol)
