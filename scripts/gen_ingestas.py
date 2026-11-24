@@ -4,8 +4,9 @@ Generador DL 2.0 (v5): ingestas (artifacts) y modelos std (data-models) por sist
 
     python gen_ingestas.py                 # todas las tablas de in/new_migration_tables_to_dl2.csv
     python gen_ingestas.py <sistema>       # solo un sistema origen (código de entrada; también acepta el nombre DL 2.0)
-    python gen_ingestas.py --sin-prueba    # no genera la ingesta de prueba de conexión (por defecto se genera una por sistema)
-    El script SOLO LEE los repos: todo lo que genera queda en out/. Para llevar a la rama de trabajo las tablas LISTO:
+    python gen_ingestas.py --sin-prueba    # no genera la prueba de conexión (permanente en dev y prd; por defecto una por sistema)
+    El script SOLO LEE los repos: todo lo que genera queda en out/. Para llevar a la rama de trabajo las tablas LISTO
+    (y la prueba de conexión, si su tabla base está LISTO):
     bash out/<sistema>/out/copiar_a_repos.sh   (lo ejecuta el usuario cuando decide; valida que no sea una rama protegida)
 
 scripts/
@@ -18,8 +19,8 @@ scripts/
           · <sis>_ddl.csv (opcional) · .estado.json (estado interno del script, oculto: no se edita)
     out/  ESTADO.md · trazabilidad_dl1.csv (SENSIBLE: valores de conexión DL 1.0)
           artifacts/co/data_source/<sis>/<tabla>/*  · artifacts/co/variables.yaml   (rutas del repo destino)
-          prueba_conexion/artifacts/co/data_source/<sis>/all_tables/<sis>_all_tables.yaml  (árbol APARTE: copiar_a_repos.sh no lo copia)
-          copiar_prueba_conexion.sh · retirar_prueba_conexion.sh   (solo ramas test/*; ver ESTADO.md «Prueba de conexión»)
+          artifacts/co/data_source/<sis>/all_tables/<sis>_all_tables.yaml  (prueba de conexión PERMANENTE en dev y prd: sale con las tablas)
+          retirar_prueba_conexion.sh   (solo si se decide retirar la prueba; ver ESTADO.md «Prueba de conexión»)
           models/<dbt_proyecto>/models/std_<dominio>/<tabla>/* · models/.../std_<dominio>/__sources.yml
 
 Por sistema: scan (columnas DL 1.0 + DDL, tipos, policy tags, estado_gobierno) → conexión DL 1.0 (rama productiva)
@@ -33,7 +34,7 @@ from datetime import date
 from pathlib import Path
 import yaml
 
-VERSION, GEN, MARCA = "6.6", "v1", "dl2-gen"   # v6.6 (20-nov-2026)
+VERSION, GEN, MARCA = "6.7", "v1", "dl2-gen"   # v6.7 (24-nov-2026)
 HERE = Path(__file__).resolve().parent
 IN, OUT = HERE / "in", HERE / "out"          # in: catálogos y lista · out/<sistema>/{in,out}
 LISTA = IN / "new_migration_tables_to_dl2.csv"
@@ -58,6 +59,9 @@ CLIENTE_DEFECTO = {
     "aprobacion_total": False,     # True: solo `aprobado` pasa a LISTO (con False, `sugerido` también pasa)
     "umbral_borrado": 0.2,         # CDC: fracción de borrados sobre lo vigente a partir de la cual el modelo aborta
     "prefijo_dag": "xx_",          # prefijo del id del DAG de extracción en Composer: <prefijo><sistema>_<tabla>-extraction
+    # opcional: prueba de conexión permanente. minutos_antes = minutos antes de la primera extracción del sistema;
+    # scheduling no vacío fuerza ese cron (en lugar del calculado)
+    "prueba_conexion": {"minutos_antes": 30, "scheduling": ""},
 }
 
 def cargar_cliente():
@@ -65,6 +69,8 @@ def cargar_cliente():
     if CLIENTE_YAML.exists():
         datos = yaml.safe_load(CLIENTE_YAML.read_text(encoding="utf-8")) or {}
         cfg.update({k: v for k, v in datos.items() if k in CLIENTE_DEFECTO})
+        pc = datos.get("prueba_conexion")                                        # v6.7: se fusiona con el valor por defecto
+        cfg["prueba_conexion"] = {**CLIENTE_DEFECTO["prueba_conexion"], **(pc if isinstance(pc, dict) else {})}
         if datos.get("recurso_nombre") and not datos.get("sistema_nombre"):      # alias heredado (v6.2-v6.4)
             cfg["sistema_nombre"] = datos["recurso_nombre"]
             print("  AVISO: `recurso_nombre` de in/cliente.yaml es un alias heredado: ahora define el nombre DL 2.0 del sistema "
@@ -140,6 +146,10 @@ MODIFICACION = re.compile(r"(FEC|FCH|FECHA|DATE|DT).*(MOD|ACT|UPD|ULT|CAMB|AUD)|
                           r"(FEC|FCH|FECHA|DATE|DT)|LAST_UPD|UPDATED_AT", re.I)
 FECHA_INFO = "$FECHA_INFORMACION"
 PREFIJO_DAG = CLI["prefijo_dag"]   # id del DAG de extracción: <prefijo><sis>_<tabla>-extraction
+# Prueba de conexión permanente (v6.7): su schedule se calcula PRUEBA_MINUTOS_ANTES minutos antes de la primera extracción del
+# sistema; con PRUEBA_SCHEDULING no vacío se fuerza ese cron (in/cliente.yaml: prueba_conexion.minutos_antes / .scheduling).
+PRUEBA_MINUTOS_ANTES = int(CLI["prueba_conexion"]["minutos_antes"])
+PRUEBA_SCHEDULING = str(CLI["prueba_conexion"].get("scheduling") or "")
 CONTROL = re.compile(r"\b(SYSDATE|SYSTIMESTAMP|CURRENT_DATE|CURRENT_TIMESTAMP|GETDATE)\b", re.I)  # columna de control
 DINAMICO = re.compile(r"var\(|target\.|env_var\(")
 # Contacto técnico: el correo de alertas va por llave de variables.yaml (dato sensible, distinto por ambiente);
@@ -851,6 +861,8 @@ def normalizar_tag(tag, cat):
 def index_dl2(artifacts, envs):
     idx, infos, base = {}, [], Path(artifacts) / "co/data_source"
     for y in sorted(base.rglob("*.yaml")):
+        if y.parent.name == "all_tables":             # v6.7: la prueba de conexión no es tabla hermana ni entra en la convención
+            continue
         text = y.read_text(encoding="utf-8", errors="replace")
         doc = load_refyaml(text)
         frm = re.search(r"FROM\s+\{([A-Z0-9_]+)\}\.([A-Z0-9_$#]+)", text, re.I)
@@ -2195,7 +2207,7 @@ def paso_render(a, maestra, propuestas, estado_conn):
                 propuestas[env][k] = (str(v), "valor manual (out/variables.yaml)")
     manifiesto, conservados = {}, []
     usos_tot, resumen, fuentes = defaultdict(set), [], defaultdict(list)
-    base_prueba = None                                # (tabla, dict YAML) de la primera tabla con YAML (v6.6)
+    candidatas_prueba = []                            # [(tabla, dict YAML)] de las tablas con YAML, en el orden de la lista (v6.7)
     for t in tablas:
         t = {k: (t.get(k) or d) for k, _, d in FILA}
         t["update_type"] = "completa"                                   # derivado de la estrategia efectiva (render_table)
@@ -2213,8 +2225,8 @@ def paso_render(a, maestra, propuestas, estado_conn):
         rep_t, usos_t = [], defaultdict(set)
         t["_ef"], t["_extra"], t["_pend"] = estrategia_efectiva(t, cols, maestra), [], []
         files = render_table(t, cols, a, out_root, ctx, rep_t, usos_t) if cols else []
-        if cols and base_prueba is None:
-            base_prueba = (t, t["_yaml"])
+        if cols:
+            candidatas_prueba.append((t, t["_yaml"]))
         files, cons = aplicar_ediciones(files, out_root, editados, manifiesto)
         conservados += cons
         pend = []
@@ -2327,9 +2339,11 @@ def paso_render(a, maestra, propuestas, estado_conn):
     for f in filas:
         f["estado"] = est_t.get(f"{f['sistema']}_{f['tabla']}", f.get("estado", ""))
     escribir_tablas(R["tablas"], filas)
-    escribir_copia(a, maestra, out_root, resumen)
+    a.prueba = escribir_prueba(a, maestra, out_root, candidatas_prueba, resumen, editados, manifiesto)   # con el estado final
+    if a.prueba.get("editado"):
+        conservados.append(a.prueba["ruta"])
+    escribir_copia(a, maestra, out_root, resumen, a.prueba)
     escribir_retiro(a, maestra, out_root, resumen)
-    a.prueba = escribir_prueba(a, maestra, out_root, base_prueba, resumen)
     (out_root / ".generado.json").write_text(json.dumps(manifiesto, indent=0, sort_keys=True), encoding="utf-8")
     escribir_estado(maestra, R, resumen, propuestas, envs, notas_src, pt_dbt, dbt_nuevas, sorted(set(conservados)), a.ren, a.prueba)
     return resumen
@@ -3131,8 +3145,8 @@ def escribir_estado(maestra, R, resumen, propuestas, envs, notas_src, pt_dbt, db
           "3. Llaves y vars PENDIENTE: completar el valor en `out/…/co/variables.yaml` y `out/models/dbt_project.yml` "
           "(se conservan entre corridas). El script no escribe en los repos.",
           "4. Volver a correr hasta que las tablas pasen a LISTO.",
-          f"5. En la rama de trabajo: `bash out/{maestra}/out/copiar_a_repos.sh` (solo tablas LISTO + variables, vars dbt "
-          f"y __sources.yml) → `git diff` → `run_checks.py` → commit → PR a {ENV_DEV}.", "",
+          f"5. En la rama de trabajo: `bash out/{maestra}/out/copiar_a_repos.sh` (solo tablas LISTO, la prueba de conexión "
+          f"si su tabla base está LISTO, variables, vars dbt y __sources.yml) → `git diff` → `run_checks.py` → commit → PR a {ENV_DEV}.", "",
           f"`out/` replica las rutas de los repos: `artifacts/` → {CLI['dir_artifacts']}, `models/` → "
           f"{CLI['dir_models']}. `trazabilidad_dl1.csv` y `artifacts/co/variables.yaml` llevan valores "
           "de conexión: SENSIBLE, no compartir."]
@@ -3143,8 +3157,8 @@ def escribir_estado(maestra, R, resumen, propuestas, envs, notas_src, pt_dbt, db
     R["estado"].write_text("\n".join(L) + "\n", encoding="utf-8")
 
 
-# ----------------------------------------------------------------------------- prueba de conexión (v6.6)
-PRUEBA_TAG, PRUEBA_RAMA = "prueba-conexion", "test/"   # marca propia del YAML · prefijo de la única rama donde se copia
+# ----------------------------------------------------------------------------- prueba de conexión (v6.6; permanente desde v6.7)
+PRUEBA_TAG = "prueba-conexion"                         # marca propia del YAML
 PRUEBA_REGEX = "n/a.*\\/.*.csv$"                       # nunca coincide: lnd-to-transformed no se dispara
 # tecnología -> (consulta mínima al diccionario del motor, columnas que declara el extractor cipher)
 PRUEBA_SQL = {
@@ -3162,10 +3176,10 @@ def es_prueba_conexion(path):
         return False
     return MARCA in l and PRUEBA_TAG in l
 
-def yaml_prueba(y, t):
+def yaml_prueba(y, t, scheduling=""):
     """Ingesta de prueba de conexión a partir del dict renderizado de una tabla (patrón <sis>/all_tables). Conserva conexión,
     secretos, bucket de landing y tópicos (lo que se prueba) y cambia solo lo necesario para no tocar tablas de negocio ni
-    disparar lnd-to-transformed. -> (dict, consulta, columnas, aviso)."""
+    disparar lnd-to-transformed. `scheduling` = cron calculado por cron_prueba. -> (dict, consulta, columnas, aviso)."""
     tec = (t.get("tecnologia") or "").strip().lower()
     consulta, columnas = PRUEBA_SQL.get(tec) or PRUEBA_SQL["oracle"]
     aviso = "" if tec in PRUEBA_SQL else f"tecnología '{tec or '-'}' sin consulta propia: se usó la de Oracle; confirmar"
@@ -3179,7 +3193,7 @@ def yaml_prueba(y, t):
     put(p, "gcp.bigquery.raw.raw_table", "na")
     put(p, "gcp.bigquery.raw.raw_schema", "na")
     put(p, "gcp.bigquery.trf_steps", [{"dbt_model": "na"}])
-    put(p, "gcp.composer.extraction.scheduling", "")
+    put(p, "gcp.composer.extraction.scheduling", scheduling)
     return p, consulta, columnas, aviso
 
 def _sh(x):
@@ -3191,30 +3205,16 @@ def _guarda_rama(var):
             'case "$b" in ' + "|".join(PROTEGIDAS) + '|"") echo "ERROR: ' + f'${var}' + ' está en la rama \'$b\' (protegida o sin rama): cambiar a una rama de trabajo"; exit 1;; esac']
 
 def escribir_scripts_prueba(a, out_root, nom):
-    """out/<sis>/out/copiar_prueba_conexion.sh y retirar_prueba_conexion.sh (los ejecuta el usuario; el generador no)."""
+    """out/<sis>/out/retirar_prueba_conexion.sh (lo ejecuta el usuario; el generador no). La prueba es permanente: el script
+    solo se usa si se decide retirarla."""
     rel = Path(os.path.relpath(a.artifacts, out_root)).as_posix()
     hoy = date.today().isoformat()
     dir_rel = f"co/data_source/{nom}/all_tables"
     arc = f"{nom}_all_tables.yaml"
-    L = ["#!/usr/bin/env bash",
-         f"# gen_ingestas v{VERSION} · {hoy} · {nom}: copia la ingesta de PRUEBA DE CONEXIÓN (y co/variables.yaml) al repo de artifacts.",
-         f"# Solo en ramas {PRUEBA_RAMA}*. Revisar ESTADO.md (sección Prueba de conexión). No hace commit.",
-         "set -euo pipefail", 'cd "$(dirname "$0")"', f'ART="${{ART:-{rel}}}"']
-    L += _guarda_rama("ART")
-    L += [f'case "$b" in {PRUEBA_RAMA}*) ;; *) echo "ERROR: la rama \'$b\' no empieza por {PRUEBA_RAMA}: crear {PRUEBA_RAMA}DL2-<ticket>-conexion-{nom} desde {RAMA_PRD_DL2}"; exit 1;; esac',
-          'echo "$ART → $b"',
-          f'mkdir -p "${{ART}}/{dir_rel}" && cp {_sh("prueba_conexion/artifacts/" + dir_rel + "/" + arc)} "${{ART}}/{dir_rel}/{arc}"',
-          'if [ -f artifacts/co/variables.yaml ]; then',
-          '  mkdir -p "${ART}/co" && cp artifacts/co/variables.yaml "${ART}/co/variables.yaml"',
-          "else",
-          '  echo "AVISO: no hay artifacts/co/variables.yaml en out/: las llaves de conexión nuevas deben existir ya en el repo"',
-          "fi",
-          f'echo "Copiados {arc} y co/variables.yaml (revisar git diff: variables.yaml trae todo lo generado del sistema)."',
-          f'echo "Solo PR a {RAMA_DEV_DL2}. Nunca a {RAMA_PRD_DL2}. Borrar con retirar_prueba_conexion.sh después del diagnóstico"']
-    (out_root / "copiar_prueba_conexion.sh").write_text("\n".join(L) + "\n", encoding="utf-8", newline="\n")
     R_ = ["#!/usr/bin/env bash",
           f"# gen_ingestas v{VERSION} · {hoy} · {nom}: retira del repo de artifacts la ingesta de PRUEBA DE CONEXIÓN ({dir_rel}).",
-          f"# Solo si el YAML lleva la marca {PRUEBA_TAG}. Se ejecuta en una rama de trabajo (nunca en {', '.join(PROTEGIDAS)}). No hace commit.",
+          "# La prueba es PERMANENTE (validación diaria de la conexión en dev y prd): este script solo se usa si se decide retirarla.",
+          f"# Solo si el YAML lleva la marca {PRUEBA_TAG}. Se ejecuta en una rama de trabajo (se niega en {', '.join(PROTEGIDAS)}). No hace commit.",
           "set -euo pipefail", 'cd "$(dirname "$0")"', f'ART="${{ART:-{rel}}}"']
     R_ += _guarda_rama("ART")
     R_ += [f'D={_sh(dir_rel)}', f'Y="$D/{arc}"',
@@ -3232,79 +3232,138 @@ def escribir_scripts_prueba(a, out_root, nom):
            "fi"]
     (out_root / "retirar_prueba_conexion.sh").write_text("\n".join(R_) + "\n", encoding="utf-8", newline="\n")
 
-def escribir_prueba(a, maestra, out_root, base, resumen):
-    """Genera out/<sis>/out/prueba_conexion/artifacts/co/data_source/<nom>/all_tables/<nom>_all_tables.yaml (árbol aparte: copiar_a_repos.sh
-    nunca lo copia) y los dos scripts. base = (fila de tabla, dict YAML) de la primera tabla con YAML, LISTO o BORRADOR.
-    -> info para ESTADO.md."""
+def _hm(cron):
+    """(hora, minuto) de un cron de 5 campos con minuto y hora enteros simples y `* * *` en el resto; None si no cumple."""
+    m = re.fullmatch(r"([0-9]{1,2}) ([0-9]{1,2}) \* \* \*", " ".join(str(cron or "").split()))
+    if not m:
+        return None
+    mi, h = int(m.group(1)), int(m.group(2))
+    return (h, mi) if mi <= 59 and h <= 23 else None
+
+def primera_extraccion(schedules):
+    """El cron simple más temprano (hora*60 + minuto) de los schedules, normalizado en espacios; None si ninguno es simple."""
+    ok = [(h * 60 + m, " ".join(str(s).split())) for s in schedules for hm in [_hm(s)] if hm for h, m in [hm]]
+    return min(ok)[1] if ok else None
+
+def cron_prueba(schedules, minutos_antes=None):
+    """Schedule de la prueba de conexión: `minutos_antes` (por defecto PRUEBA_MINUTOS_ANTES) minutos antes de la extracción más
+    temprana del sistema, módulo 24 h, sin ceros a la izquierda: `M H * * *`. Con PRUEBA_SCHEDULING no vacío se devuelve ese cron.
+    Sin ningún schedule simple (minuto y hora enteros, `* * *`) -> '' (el aviso lo da ESTADO.md)."""
+    if (PRUEBA_SCHEDULING or "").strip():
+        return PRUEBA_SCHEDULING.strip()
+    primera = primera_extraccion(schedules)
+    if primera is None:
+        return ""
+    h, m = _hm(primera)
+    t = (h * 60 + m - int(PRUEBA_MINUTOS_ANTES if minutos_antes is None else minutos_antes)) % 1440
+    return f"{t % 60} {t // 60} * * *"
+
+def _prueba_en_copia(info):
+    """La prueba va en copiar_a_repos.sh solo si su tabla base quedó LISTO (sus llaves son un subconjunto de las de la base)."""
+    return bool(info) and info.get("estado") == "generada" and info.get("est_tabla") == "LISTO"
+
+def escribir_prueba(a, maestra, out_root, candidatas, resumen, editados=None, manifiesto=None):
+    """Genera out/<sis>/out/artifacts/co/data_source/<nom>/all_tables/<nom>_all_tables.yaml (el árbol principal: sale con
+    copiar_a_repos.sh) y retirar_prueba_conexion.sh. candidatas = [(fila de tabla, dict YAML)] de las tablas con YAML, en el orden
+    de la lista; la base es la primera LISTO y, si ninguna lo está, la primera. El hash va al manifiesto (una edición manual en
+    out/ se conserva). -> info para ESTADO.md y copiar_a_repos.sh."""
     nom = nombre_sis(maestra)
+    (out_root / "copiar_prueba_conexion.sh").unlink(missing_ok=True)      # v6.6: la prueba ya no se copia aparte
     if getattr(a, "sin_prueba", False):
-        (out_root / "copiar_prueba_conexion.sh").unlink(missing_ok=True)
         return {"estado": "omitida"}
-    if base is None:
-        (out_root / "copiar_prueba_conexion.sh").unlink(missing_ok=True)
+    if not candidatas:
         return {"estado": "sin_yaml"}
-    t, y = base
-    p, consulta, columnas, aviso = yaml_prueba(y, t)
+    estado = {r["tabla"]: r["estado"] for r in resumen}
+    t, y = next((c for c in candidatas if estado.get(f"{c[0]['sistema']}_{c[0]['tabla']}") == "LISTO"), candidatas[0])
+    scheds = [c[0].get("scheduling") for c in candidatas]
+    sched, primera = cron_prueba(scheds), primera_extraccion(scheds)
+    forzado = bool((PRUEBA_SCHEDULING or "").strip())
+    p, consulta, columnas, aviso = yaml_prueba(y, t, sched)
     cipher = t["extractor"] == "cipher"
-    dest = out_root / "prueba_conexion/artifacts/co/data_source" / nom / "all_tables" / f"{nom}_all_tables.yaml"
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest = out_root / "artifacts/co/data_source" / nom / "all_tables" / f"{nom}_all_tables.yaml"
     marca = f"# {MARCA}: {GEN} | {PRUEBA_TAG} | {date.today().isoformat()} | {nom.upper()}.all_tables\n"
-    dest.write_text(marca + dump(p), encoding="utf-8", newline="\n")
+    files, cons = aplicar_ediciones([(dest, marca + dump(p))], out_root, editados or {}, manifiesto if manifiesto is not None else {})
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(files[0][1], encoding="utf-8", newline="\n")
     escribir_scripts_prueba(a, out_root, nom)
     key = f"{t['sistema']}_{t['tabla']}"
-    est = next((r["estado"] for r in resumen if r["tabla"] == key), "")
-    return {"estado": "generada", "nom": nom, "ruta": dest.relative_to(out_root).as_posix(),
-            "tabla": f"{nom}_{t['tabla']}", "est_tabla": est, "variante": "cipher" if cipher else "jdbc",
+    info = {"estado": "generada", "nom": nom, "ruta": dest.relative_to(out_root).as_posix(),
+            "destino": f"co/data_source/{nom}/all_tables/{nom}_all_tables.yaml",
+            "tabla": f"{nom}_{t['tabla']}", "est_tabla": estado.get(key, ""), "variante": "cipher" if cipher else "jdbc",
             "tecnologia": (t.get("tecnologia") or "").strip().lower() or "-", "consulta": consulta,
-            "columnas": columnas if cipher else "", "dag": f"{PREFIJO_DAG}{nom}_all_tables-extraction", "aviso": aviso}
+            "columnas": columnas if cipher else "", "dag": f"{PREFIJO_DAG}{nom}_all_tables-extraction", "aviso": aviso,
+            "scheduling": sched, "forzado": forzado, "primera": primera or "", "minutos_antes": PRUEBA_MINUTOS_ANTES,
+            "editado": bool(cons)}
+    info["en_copia"] = _prueba_en_copia(info)
+    return info
 
 def seccion_prueba(maestra, info):
-    """Sección ESTADO.md «Prueba de conexión»."""
+    """Sección ESTADO.md «Prueba de conexión» (ingesta permanente en dev y prd desde v6.7)."""
     L = ["", "## Prueba de conexión", ""]
     est = (info or {}).get("estado")
     if est == "omitida":
         return L + ["Omitida (`--sin-prueba`): no se generó la ingesta de prueba de conexión."]
     if est != "generada":
         return L + ["No se generó: ninguna tabla del sistema tiene YAML (sin columnas o sin fuente). Se genera con la primera tabla "
-                    "que tenga YAML, aunque esté en BORRADOR."]
-    nom, dev, prd = info["nom"], RAMA_DEV_DL2, RAMA_PRD_DL2
+                    "LISTO que tenga YAML o, si ninguna lo está, con la primera que lo tenga (aunque esté en BORRADOR)."]
+    nom = info["nom"]
     ext = "avro" if info["variante"] == "cipher" else "CSV"
-    L += ["Ingesta mínima que solo prueba conexión, secreto, cuenta de servicio, bucket de landing y tópicos: consulta el diccionario del "
-          "motor, no toca tablas de negocio y no dispara lnd-to-transformed (regex que nunca coincide, raw y dbt en `na`, sin schedule).", "",
-          f"- Archivo generado: `out/{maestra}/out/{info['ruta']}` (árbol aparte: `copiar_a_repos.sh` nunca lo copia)",
+    if info.get("forzado"):
+        sch = f"`{info['scheduling']}` (fijado por configuración: `prueba_conexion.scheduling` / `PRUEBA_SCHEDULING`)"
+    elif info.get("scheduling"):
+        sch = (f"`{info['scheduling']}` ({info.get('minutos_antes')} min antes de la primera extracción del sistema, "
+               f"{info.get('primera')} UTC)")
+    else:
+        sch = ("sin definir: ninguna tabla del sistema tiene un schedule simple (minuto y hora enteros, `* * *`). "
+               "AVISO: definir el horario (`prueba_conexion.scheduling` en `in/cliente.yaml` o `PRUEBA_SCHEDULING`); "
+               "mientras tanto el DAG solo corre manual")
+    if info.get("en_copia"):
+        copia = "sí (la tabla base está LISTO; el script no pisa un `all_tables` del repo que no lleve la marca `prueba-conexion`)"
+    else:
+        copia = (f"no (la tabla base `{info['tabla']}` está en {info['est_tabla'] or '-'}, no LISTO: sus llaves aún no están "
+                 "completas; queda solo en `out/` hasta que la base pase a LISTO)")
+    L += ["Ingesta permanente en dev y prd: valida cada día la conexión, el secreto, la cuenta de servicio, el bucket de landing y los "
+          "tópicos. Consulta el diccionario del motor, no toca tablas de negocio y no dispara lnd-to-transformed (regex que nunca "
+          "coincide, raw y dbt en `na`).", "",
+          f"- Archivo generado: `out/{maestra}/out/{info['ruta']}`" + (" (editado a mano: se conserva)" if info.get("editado") else ""),
+          f"- Destino en el repo de artifacts: `{info['destino']}`",
           f"- Tabla base: `{info['tabla']}` ({info['est_tabla'] or '-'}) · variante {info['variante']} · tecnología {info['tecnologia']}",
           f"- Consulta: `{info['consulta']}`" + (f" · columnas: `{info['columnas']}`" if info["columnas"] else ""),
-          f"- DAG esperado: `{info['dag']}`"]
+          f"- Scheduling: {sch}",
+          f"- DAG: `{info['dag']}`",
+          f"- En `copiar_a_repos.sh`: {copia}"]
     if info["aviso"]:
         L.append(f"- AVISO: {info['aviso']}")
-    L += ["", "Procedimiento:", "",
-          f"1. Crear la rama `{PRUEBA_RAMA}DL2-<ticket>-conexion-{nom}` desde `{prd}` en el repo de artifacts.",
-          f"2. `bash out/{maestra}/out/copiar_prueba_conexion.sh` (copia el YAML de prueba y `co/variables.yaml`; se niega fuera de ramas `{PRUEBA_RAMA}*`).",
-          f"3. `git diff` → commit → PR a `{dev}`. Nunca a `{prd}`.",
-          f"4. Tras el deploy de {dev}, \"Trigger DAG\" de `{info['dag']}` en Composer.",
-          f"5. Verificar que llegue a landing un {ext} de `{nom}_all_tables`. Si llega: conexión, secreto, cuenta de servicio y bucket están OK "
-          "y el problema está en la consulta de la tabla o en los permisos sobre ella. Si no llega: revisar conectividad, lista blanca, "
-          "secreto y bucket.",
-          f"6. Con el diagnóstico hecho: `bash out/{maestra}/out/retirar_prueba_conexion.sh` en una rama de trabajo (solo retira si el YAML lleva "
-          f"la marca `{PRUEBA_TAG}`) → commit → PR a `{dev}`. La limpieza del deploy de {dev} retira el DAG al borrar el YAML.", "",
-          f"Recordar: la prueba nunca va a `{prd}`."]
+    L += ["", "Pruebas de calidad (artifacts): `structure` exige que `raw_schema` apunte a un JSON y la prueba lleva `na`. Mientras "
+          "la prueba no tenga excepción propia, registrar en `ci/checks/known_debt.txt` la línea "
+          f"`file:{info['destino']}` (con ticket), en el mismo fin de línea del archivo."]
+    L += ["", "Validación:", "",
+          f"- Verificar cada día que llegue a landing el {ext} de `{nom}_all_tables`. Si llega, conexión, secreto, cuenta de servicio y "
+          "bucket están OK y un problema en una tabla está en su consulta o en los permisos sobre ella.",
+          "- Si no llega: revisar conectividad, lista blanca, secreto, cuenta de servicio o bucket.",
+          "- Nota: el DAG de extracción queda en verde aunque no llegue el archivo (solo publica el mensaje): la alerta por archivo "
+          "faltante está pendiente.", "",
+          f"Es permanente: `bash out/{maestra}/out/retirar_prueba_conexion.sh` (en una rama de trabajo; solo retira si el YAML lleva la "
+          f"marca `{PRUEBA_TAG}`) se usa únicamente si se decide retirarla."]
     return L
 
 
-
-def escribir_copia(a, maestra, out_root, resumen):
-    """out/<sis>/out/copiar_a_repos.sh: copia a las ramas de trabajo las tablas LISTO y los archivos compartidos
+def escribir_copia(a, maestra, out_root, resumen, prueba=None):
+    """out/<sis>/out/copiar_a_repos.sh: copia a las ramas de trabajo las tablas LISTO, la prueba de conexión (si su tabla base
+    está LISTO; no pisa un all_tables del repo sin su marca) y los archivos compartidos
     (variables.yaml, dbt_project.yml, __sources.yml). El generador no lo ejecuta: lo corre el usuario cuando decide.
     Se niega a copiar si artifacts o data-models están en una rama protegida o sin rama."""
     rel = lambda r: Path(os.path.relpath(r, out_root)).as_posix()
     listos = [r for r in resumen if r["estado"] == "LISTO"]
-    arch = [x for r in listos for x in r["archivos"] if not x.startswith("prueba_conexion/")]   # la prueba de conexión nunca va aquí
+    arch = [x for r in listos for x in r["archivos"]]
+    prueba_ok = bool(listos) and _prueba_en_copia(prueba)
     compartidos = [x for x in ("artifacts/co/variables.yaml", "models/dbt_project.yml") if (out_root / x).exists()]
     compartidos += sorted(f.relative_to(out_root).as_posix()               # todo __sources.yml generado (nuevas tablas o renombre)
                           for f in (out_root / "models").rglob("__sources.yml"))
     L = ["#!/usr/bin/env bash",
          f"# gen_ingestas v{VERSION} · {date.today().isoformat()} · {nombre_sis(maestra)}: copia a las ramas de trabajo SOLO las tablas LISTO",
-         f"# ({len(listos)} de {len(resumen)}). Revisar ESTADO.md antes. Después: git status, git diff, run_checks.py.",
+         f"# ({len(listos)} de {len(resumen)}){' + la prueba de conexión (tabla base LISTO)' if prueba_ok else ''}. "
+         "Revisar ESTADO.md antes. Después: git status, git diff, run_checks.py.",
          "set -euo pipefail", 'cd "$(dirname "$0")"',
          f'ART="${{ART:-{rel(a.artifacts)}}}"', f'MOD="${{MOD:-{rel(a.models)}}}"',
          'for r in "$ART" "$MOD"; do',
@@ -3313,12 +3372,29 @@ def escribir_copia(a, maestra, out_root, resumen):
          '  echo "$r → $b"', "done"]
     if not listos:
         L += ['echo "Ninguna tabla LISTO: no se copia nada (ver ESTADO.md)"']
-    for x in arch + (compartidos if listos else []):
+    def cp(x):
         sub, _, resto = x.partition("/")
         dst = f'"${{{"ART" if sub == "artifacts" else "MOD"}}}/{resto}"'
-        L += [f'mkdir -p "$(dirname {dst})" && cp "{x}" {dst}']
+        return [f'mkdir -p "$(dirname {dst})" && cp "{x}" {dst}']
+    for x in arch:
+        L += cp(x)
+    if prueba_ok:                                  # la prueba de conexión no pisa un all_tables del repo que no sea una prueba generada
+        ruta_pc = prueba["ruta"]
+        L += [f'pc="${{ART}}/{ruta_pc.partition("/")[2]}"', 'pc_ok=1',
+              'if [ -f "$pc" ]; then',
+              f'  case "$(head -n 1 "$pc")" in *{MARCA}*{PRUEBA_TAG}*) ;; *) pc_ok=0;; esac',
+              'fi',
+              'if [ "$pc_ok" = 1 ]; then',
+              f'  mkdir -p "$(dirname "$pc")" && cp "{ruta_pc}" "$pc"',
+              'else',
+              f'  echo "AVISO: $pc ya existe en el repo y su primera línea no lleva {MARCA} + {PRUEBA_TAG}: no se pisa"',
+              'fi']
+    for x in (compartidos if listos else []):
+        L += cp(x)
     if listos:
-        L += [f'echo "Copiados {len(arch)} archivos de {len(listos)} tablas LISTO + {len(compartidos)} compartidos. '
+        L += [f'echo "Copiados {len(arch)} archivos de {len(listos)} tablas LISTO'
+              + (' + 1 de prueba de conexión (si no hay una propia en el repo)' if prueba_ok else '')
+              + f' + {len(compartidos)} compartidos. '
               'Revisar git diff (variables.yaml, dbt_project.yml y __sources.yml traen todo lo generado del sistema)."']
     f = out_root / "copiar_a_repos.sh"
     f.write_text("\n".join(L) + "\n", encoding="utf-8", newline="\n")
@@ -3478,8 +3554,8 @@ def procesar(a, maestra):
           f"{sum(r['estado'] == 'BORRADOR' for r in resumen)} borrador · "
           f"{sum(r['estado'] == 'SIN FUENTE' for r in resumen)} sin fuente → out/{maestra}/out/ESTADO.md")
     print(f"  copia a la rama de trabajo (cuando decidas): bash out/{maestra}/out/copiar_a_repos.sh")
-    if (getattr(a, "prueba", None) or {}).get("estado") == "generada":
-        print(f"  prueba de conexión (solo rama {PRUEBA_RAMA}*): bash out/{maestra}/out/copiar_prueba_conexion.sh")
+    if (getattr(a, "prueba", None) or {}).get("en_copia"):
+        print("  prueba de conexión permanente (dev y prd): incluida en copiar_a_repos.sh (tabla base LISTO)")
 
 
 if __name__ == "__main__":
