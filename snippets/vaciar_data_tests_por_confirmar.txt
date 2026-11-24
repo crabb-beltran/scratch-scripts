@@ -18,6 +18,8 @@ for p in pathlib.Path("datope_bfaco/models").rglob("schema.yml"):
                 if s.strip() and (k < ind or (k == ind and not s.lstrip().startswith("- "))):
                     break
                 j += 1
+            while j > i + 1 and not L[j - 1].strip():   # no tragar líneas en blanco al final del bloque
+                j -= 1
             if any("POR_CONFIRMAR" in x for x in L[i:j]):
                 out.append(" " * ind + "data_tests: []"); i, hit = j, True; continue
         out.append(L[i]); i += 1
