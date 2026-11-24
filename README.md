@@ -29,4 +29,4 @@ git show origin/co-dev:dbt_project.yml > /tmp/ref.yml && python ../../scratch/sc
 
 ## Snippets
 
-- `snippets/vaciar_data_tests_por_confirmar.txt`: deja `data_tests: []` en los bloques de `schema.yml` que contienen `POR_CONFIRMAR` (data-models), conservando EOL; incluye los checks posteriores.
+- `snippets/comandos.sh`: comandos de apoyo para data-models (bup): vaciar `data_tests` con `POR_CONFIRMAR` en `schema.yml`, completar descripciones `POR_CONFIRMAR` de columnas de auditoría (schema.yml + `bup_columnas.csv`), con checks posteriores. Conservan EOL. Se copian por bloque, no se ejecuta completo.
