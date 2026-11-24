@@ -1,8 +1,7 @@
-grep -cE '^(<<<<<<<|=======|>>>>>>>)' co/variables.yaml ci/checks/known_debt.txt
-grep -c 'all_tables' ci/checks/known_debt.txt
-grep -nE '^\s*(- *)?(co-dev|co-prd)\s*:|^\s*#\s*BUP|^\s*(BUP_[A-Z_]+|USER_BUP_CREDENTIALS|PASS_BUP_CREDENTIALS)\s*:' co/variables.yaml | awk -F: '{print $1":"$2}'
-
-# repo: datope-fif-bfaco-artifacts
-git switch -c feature/DL2-FIFDF-89514-ingesta-bup-dev origin/co-dev --no-track
-git merge --no-ff --no-commit feature/DL2-FIFDF-89514-ingesta-bup
-git status --short | grep -E '^(UU|AA|DU|UD)'
+# repo: datope-fif-bfaco-artifacts · rama feature/DL2-FIFDF-89514-ingesta-bup-dev (MERGING)
+if grep -qE '^(<<<<<<<|=======|>>>>>>>)' co/variables.yaml ci/checks/known_debt.txt; then echo "QUEDAN MARCADORES: no seguir"; else
+  git add co/variables.yaml ci/checks/known_debt.txt
+  git commit -q -m "chore(ingesta): integra bup con co-dev y resuelve conflictos en variables y deuda conocida"
+  git log --oneline -1
+  python ci/checks/run_checks.py --base origin/co-dev --base-ref co-dev 2>&1 | grep -E '^\[|^\s+x|^Resultado'
+fi
