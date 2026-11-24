@@ -29,4 +29,4 @@ git show origin/co-dev:dbt_project.yml > /tmp/ref.yml && python ../../scratch/sc
 
 ## Snippets
 
-- `snippets/comandos.sh`: comandos de apoyo para data-models (bup): vaciar `data_tests` con `POR_CONFIRMAR` en `schema.yml`, completar descripciones `POR_CONFIRMAR` de columnas de auditoría (schema.yml + `bup_columnas.csv`), con checks posteriores. Conservan EOL. Se copian por bloque, no se ejecuta completo.
+- `snippets/comandos.sh`: último bloque de comandos de apoyo (se reemplaza completo en cada actualización; el historial queda en git).
