@@ -1,4 +1,11 @@
-# repo: datope-fif-bfaco-artifacts · rama co-dev
-git pull -q --ff-only && git status -sb | head -1
-git push origin --delete docs/DL2-FIFDF-89481-documentacion feature/DL2-FIFDF-89514-ingesta-bup-dev
-git fetch -q --prune origin && git branch -r | grep -E 'FIFDF-(89481|89514|89796|90002)'
+# repo: datope-fif-bfaco-data-models
+cd ../datope-fif-bfaco-data-models
+git fetch -q --prune origin
+git switch -q co-dev && git status -sb | head -1
+for b in $(git for-each-ref --format='%(refname:short)' refs/heads); do
+  printf '%-55s %-8s dev:%-6s prd:%s\n' "$b" \
+    "$(git for-each-ref --format='%(upstream:track)' refs/heads/$b | grep -q gone && echo GONE || echo -)" \
+    "$(git merge-base --is-ancestor $b origin/co-dev && echo merged || echo -)" \
+    "$(git merge-base --is-ancestor $b origin/co-prd && echo merged || echo -)"
+done
+git branch -r | grep -vE 'HEAD|co-dev$|co-prd$'
