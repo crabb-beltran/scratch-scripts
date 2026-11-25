@@ -1,11 +1,6 @@
-# repo: datope-fif-bfaco-data-models
-cd ../datope-fif-bfaco-data-models
-git fetch -q --prune origin
-git switch -q co-dev && git status -sb | head -1
-for b in $(git for-each-ref --format='%(refname:short)' refs/heads); do
-  printf '%-55s %-8s dev:%-6s prd:%s\n' "$b" \
-    "$(git for-each-ref --format='%(upstream:track)' refs/heads/$b | grep -q gone && echo GONE || echo -)" \
-    "$(git merge-base --is-ancestor $b origin/co-dev && echo merged || echo -)" \
-    "$(git merge-base --is-ancestor $b origin/co-prd && echo merged || echo -)"
-done
-git branch -r | grep -vE 'HEAD|co-dev$|co-prd$'
+# repo: datope-fif-bfaco-data-models · rama feature/DL2-FIFDF-89514-ingesta-bup
+git diff --stat --ignore-cr-at-eol | tail -1
+git ls-files --eol -- dbt_project.yml 'datope_bfaco/models/std_customer/bup_sttm_customer/*' | awk '{print $1,$2,$NF}'
+git diff --stat origin/co-dev -- dbt_project.yml | tail -1
+git diff --stat --ignore-cr-at-eol origin/co-dev -- datope_bfaco/models/std_customer/ | tail -1
+git log --oneline -2 origin/co-prd -- datope_bfaco/models/std_customer/bup_sttm_customer
