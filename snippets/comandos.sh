@@ -1,9 +1,7 @@
-# repo: datope-fif-bfaco-artifacts
-git fetch -q --prune origin
-git switch -q co-dev 2>/dev/null || git switch -q -c co-dev origin/co-dev
-for b in $(git for-each-ref --format='%(refname:short)' refs/heads); do
-  printf '%-55s %-8s dev:%-6s prd:%s\n' "$b" \
-    "$(git for-each-ref --format='%(upstream:track)' refs/heads/$b | grep -q gone && echo GONE || echo -)" \
-    "$(git merge-base --is-ancestor $b origin/co-dev && echo merged || echo -)" \
-    "$(git merge-base --is-ancestor $b origin/co-prd && echo merged || echo -)"
-done
+# repo: datope-fif-bfaco-artifacts · rama co-dev
+git branch -D docs/DL2-FIFDF-89481-documentacion \
+  feature/DL2-FIFDF-90002-admiprod-adb-persona \
+  feature/DL2-FIFDF-ingesta-admiprod-dev \
+  feature/DL2-FIFDF-89514-ingesta-bup-dev
+git status -sb
+git diff --stat
