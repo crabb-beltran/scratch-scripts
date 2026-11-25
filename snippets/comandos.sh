@@ -1,10 +1,15 @@
-# repo: <repo-artifacts> (lectura de la rama del compañero)
-# Reemplazar antes de correr: <rama-companero> · <ruta-fuente> (carpeta data_source del sistema) · <prefijos-llaves> (regex de prefijos en variables.yaml) · <patron> · <repo-legacy> · <rama-prd-legacy>
-B="origin/<rama-companero>"
-for f in $(git ls-tree -r --name-only $B -- "<ruta-fuente>/"); do
-  echo "== $f"
-  git show "$B:$f" | grep -oiE '"(domain|sub_?domain|source_system|update_type|table_name)"\s*:\s*"[^"]*"|\b(type|extractor_type|variant|strategy|load_type)\s*:\s*\S+|from\s+[A-Za-z0-9_.\[\]]+' | sort -u | head -8
-done
-git show $B:co/variables.yaml | grep -nE '^\s*(<prefijos-llaves>)_[A-Z_]*:' | sed -E 's/^([0-9]+):\s*([A-Z_]+):.*/\1 \2/'
-git -C "../<repo-legacy>" fetch -q origin
-git -C "../<repo-legacy>" grep -il "<patron>" "origin/<rama-prd-legacy>" | head
+# carpeta: <ruta-scratch>/scripts
+# Reemplazar antes de correr: <ruta-scratch> · <repos-raiz> · <repo-artifacts> · <repo-data-models> · <rama-companero> · <patron> · <TABLA_1..3> · <SISTEMA> · <dominio> · <subdominio> · <sis>
+cd "<ruta-scratch>/scripts"
+R="../../<repos-raiz>"
+git -C "$R/<repo-artifacts>" switch -q --detach "origin/<rama-companero>"
+git -C "$R/<repo-data-models>" switch -q --detach origin/co-dev
+F=in/new_migration_tables_to_dl2.csv
+grep -ci '<patron>' $F
+[ -n "$(tail -c1 $F)" ] && echo >> $F
+printf '%s\n' \
+ '<TABLA_1>;<SISTEMA>;<dominio>;<subdominio>;jdbc' \
+ '<TABLA_2>;<SISTEMA>;<dominio>;<subdominio>;jdbc' \
+ '<TABLA_3>;<SISTEMA>;<dominio>;<subdominio>;jdbc' >> $F
+tail -4 $F
+python gen_ingestas.py <sis> 2>&1 | tail -30
