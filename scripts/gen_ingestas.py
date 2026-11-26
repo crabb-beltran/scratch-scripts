@@ -34,7 +34,7 @@ from datetime import date
 from pathlib import Path
 import yaml
 
-VERSION, GEN, MARCA = "6.8.2", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
+VERSION, GEN, MARCA = "6.8.3", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
 HERE = Path(__file__).resolve().parent
 IN, OUT = HERE / "in", HERE / "out"          # in: catálogos y lista · out/<sistema>/{in,out}
 LISTA = IN / "new_migration_tables_to_dl2.csv"
@@ -1042,15 +1042,26 @@ DECIMALES = {"NUMBER", "NUMERIC", "DECIMAL", "DEC", "MONEY", "SMALLMONEY", "FLOA
 
 def ddl_tipo(d):
     """Tipo std desde el DDL. Oracle, SQL Server y DB2 (Oracle DATE trae hora pero DL 1.0 la extraía como fecha)."""
-    t, esc = (d.get("data_type") or "").upper().split("(")[0].strip(), (d.get("data_scale") or "").strip()
+    completo = (d.get("data_type") or "").upper()
+    t, esc = completo.split("(")[0].strip(), (d.get("data_scale") or "").strip()
+    pre = (d.get("data_precision") or "").strip()
     if t == "DATE":
         return "DATE"
-    if t.startswith("TIMESTAMP") or t in ("DATETIME", "DATETIME2", "SMALLDATETIME", "DATETIMEOFFSET"):
+    if "TIME ZONE" in completo or t == "DATETIMEOFFSET":          # v6.8.3: con zona horaria -> TIMESTAMP (DATETIME la pierde)
+        return "TIMESTAMP"
+    if t.startswith("TIMESTAMP") or t in ("DATETIME", "DATETIME2", "SMALLDATETIME"):
         return "DATETIME"
     if t in ENTEROS:
         return "INT64"
     if t in DECIMALES:
-        return "INT64" if esc == "0" and t in ("NUMBER", "NUMERIC", "DECIMAL", "DEC") else "NUMERIC"
+        p = int(pre) if pre.isdigit() else None
+        s = int(esc) if re.fullmatch(r"-?\d+", esc) else None
+        if s == 0 and t in ("NUMBER", "NUMERIC", "DECIMAL", "DEC"):
+            # v6.8.3: INT64 solo hasta 18 dígitos (NUMBER(38,0) desborda y SAFE_CAST lo deja NULL sin error)
+            return "INT64" if p and p <= 18 else ("BIGNUMERIC" if p and p > 29 else "NUMERIC")
+        if (s is not None and s > 9) or (p and s is not None and p - s > 29):
+            return "BIGNUMERIC"                                     # v6.8.3: NUMERIC admite 29 enteros y 9 decimales
+        return "NUMERIC"
     return "STRING"
 
 def ddl_desc(coment):
@@ -1567,7 +1578,8 @@ def _sql_partes(t, cols, pii, dyn=None, est="snapshot"):
     que se renderiza (snapshot | incremental | cdc_hash): label load_strategy; update_type del modelo es
     incremental en incremental y cdc_hash (el modelo agrega por fecha), y el de la tabla en snapshot."""
     cast = {"DATE": "SAFE_CAST(LEFT({c}, 10) AS DATE)", "NUMERIC": "SAFE_CAST({c} AS NUMERIC)",
-            "INT64": "SAFE_CAST({c} AS INT64)", "DATETIME": "SAFE_CAST({c} AS DATETIME)"}
+            "INT64": "SAFE_CAST({c} AS INT64)", "DATETIME": "SAFE_CAST({c} AS DATETIME)",
+            "BIGNUMERIC": "SAFE_CAST({c} AS BIGNUMERIC)", "TIMESTAMP": "SAFE_CAST({c} AS TIMESTAMP)"}   # v6.8.3
     sel = ",\n".join(f"    {cast.get(c['tipo_std'], '{c}').format(c=c['columna'])} AS {c['columna'].lower()}" for c in cols)
     labels = {"env": None, "country": "co", "layer": "std", "bu": BU, "ind": IND, "comp-id": CLI["comp_id"],
               "scope": "datalake", "workload-type": "ingest", "engine": "batch", "domain": t.get("dominio_label") or t["dominio"],
@@ -2326,7 +2338,7 @@ def paso_render(a, maestra, propuestas, estado_conn):
             pend.append(f"valores de plantilla sin resolver: {', '.join(ph)} (no hay tabla hermana ni convención en el repo)")
         if any(PEND in txt for _, txt in files) and not pend:
             pend.append("quedan valores POR_CONFIRMAR en los archivos")
-        nuevo_modelo = any("__sources" in x for x in rep_t)
+        nuevo_modelo = bool(cols)          # v6.8.3: toda tabla con columnas declara su raw_table en __sources.yml (solo si falta)
         if nuevo_modelo:
             fuentes[(t["dominio"], nombre_sis(t["sistema"]))].append(t["raw_table"])
         for fp, txt in files:
@@ -3237,6 +3249,8 @@ def escribir_fuentes(a, out_root, fuentes, info=None):
             notas.append(f"std_{dom}/__sources.yml: {nota}")
         if not txt.strip():
             continue
+        if src.exists() and txt.rstrip("\n") == texto.rstrip("\n"):
+            continue                                    # v6.8.3: ya declaradas en el repo: sin copia que revisar
         dst = out_root / "models" / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         escribir_texto(dst, txt, eol)
