@@ -34,7 +34,7 @@ from datetime import date
 from pathlib import Path
 import yaml
 
-VERSION, GEN, MARCA = "6.7", "v1", "dl2-gen"   # v6.7 (24-nov-2026)
+VERSION, GEN, MARCA = "6.8", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
 HERE = Path(__file__).resolve().parent
 IN, OUT = HERE / "in", HERE / "out"          # in: catálogos y lista · out/<sistema>/{in,out}
 LISTA = IN / "new_migration_tables_to_dl2.csv"
@@ -1729,13 +1729,15 @@ def model_schema(t, cols, ef=None):
                             f"desde la bitácora {ef['hist']}).",
              "data_tests": prueba(llave), "columns": cc + [rh] + meta}]})
     cc += meta
+    # v6.8 (G3): sin llave_unica no hay prueba de unicidad (POR_CONFIRMAR como columna rompe dbt)
+    pruebas = [{"dbt_utils.unique_combination_of_columns": {
+        "combination_of_columns": llave,
+        "config": {"where": 'information_date = DATE({{ var("information_date") }})'}}}] if filled(t["llave_unica"]) else []
     return marca_txt(t, "#") + dump({"version": 2, "models": [{
         "name": t["dbt_model"].split("|")[0],
         "description": f"Histórico diario de {nombre_sis(t['sistema'])}.{t['tabla']} (origen {t['tabla_fuente']}).",
         "meta": {MARCA: GEN},
-        "data_tests": [{"dbt_utils.unique_combination_of_columns": {
-            "combination_of_columns": llave,
-            "config": {"where": 'information_date = DATE({{ var("information_date") }})'}}}],
+        "data_tests": pruebas,
         "columns": cc}]})
 
 
@@ -1803,6 +1805,47 @@ def usa_fecha_informacion(artifacts):
         TAXO["fecha_info"] = any(FECHA_INFO in f.read_text(encoding="utf-8", errors="replace")
                                  for f in (Path(artifacts) / "co/data_source").rglob("*") if f.is_file())
     return TAXO["fecha_info"]
+
+# v6.8 (G1): campos secretos de la variante cipher -> sufijo de la llave <SIS>_<sufijo> (siempre referencia {LLAVE}, nunca literal)
+SECRETOS_CIPHER = {"secret_host": "SECRET_HOST", "hashicorp_secret_path": "HASHICORP_SECRET_PATH",
+                   "external_secret": "HASHICORP_SECRET_USER", "hashicorp_secret_user": "HASHICORP_SECRET_USER"}
+OCI_VIEJO = ((r"_OCI_SECRET_PATH\}", "_HASHICORP_SECRET_PATH}"), (r"_OCI_SECRET\}", "_HASHICORP_SECRET_USER}"))
+
+
+def secretos_cipher(y, sis_up):
+    """v6.8 (G1): fija los campos secretos del YAML cipher donde estén (dict o lista key/value); si la plantilla no
+    trae alguno, lo agrega bajo extractor. Además reescribe cualquier referencia vieja <S>_OCI_SECRET[_PATH]."""
+    visto = set()
+    def marcar(k, ponerlo):
+        n = k.rsplit(".", 1)[-1]
+        if n in SECRETOS_CIPHER:
+            visto.add(n)
+            ponerlo("{%s_%s}" % (sis_up, SECRETOS_CIPHER[n]))
+    def viejo(v):
+        for rx, nuevo in OCI_VIEJO if isinstance(v, str) else ():
+            if re.search(rx, v):
+                v = type(v)(re.sub(rx, nuevo, v))      # conserva Lit / QStr
+        return v
+    def recorre(x):
+        if isinstance(x, dict):
+            for k in list(x):
+                if isinstance(k, str) and k in SECRETOS_CIPHER and not isinstance(x[k], (dict, list)):
+                    marcar(k, lambda v, x=x, k=k: x.__setitem__(k, v))
+                elif isinstance(x[k], (dict, list)):
+                    recorre(x[k])
+                else:
+                    x[k] = viejo(x[k])
+        elif isinstance(x, list):
+            for i in x:
+                if isinstance(i, dict) and isinstance(i.get("key"), str) and i["key"].rsplit(".", 1)[-1] in SECRETOS_CIPHER:
+                    marcar(i["key"], lambda v, i=i: i.__setitem__("value", v))
+                else:
+                    recorre(i)
+    recorre(y)
+    for n in SECRETOS_CIPHER:
+        if n not in visto:
+            marcar(n, lambda v, n=n: put(y, f"extractor.{n}", v))
+
 
 def render_table(t, cols, a, out, ctx, rep, usos):
     envs, idx, infos, conv, cat = ctx
@@ -1872,6 +1915,8 @@ def render_table(t, cols, a, out, ctx, rep, usos):
             put_ref(y, f"extractor.env#{k}", v)
     for k, v in S.items():
         put(y, k, v)
+    if cipher:
+        secretos_cipher(y, sis.upper())             # v6.8 (G1): secret_host / hashicorp_* / external_secret como {<S>_...}
     for k in ("project_name",):                      # sin uso ni valor definido en el repo: no se genera
         (y.get("source") or {}).pop(k, None)
     for p, v in FALLBACK.items():
@@ -2089,7 +2134,8 @@ def coincide_dl1(campo, c, v, cipher=False, bloque=None, llave=""):
 
 def campos_conn(cipher):
     """Llaves de conexión por variante. cipher: <S>_HOST (de él se derivan _PORT y _SID) y owner; los secretos de la
-    variante cifrada salen de la plantilla / tabla hermana, no de usuario y password."""
+    variante cifrada (v6.8: <S>_SECRET_HOST, <S>_HASHICORP_SECRET_PATH, <S>_HASHICORP_SECRET_USER) los fija
+    secretos_cipher en render_table y entran por `usos`, no por usuario y password."""
     if cipher:
         return (("conexion", "{S}_HOST", r"_HOST$"), CAMPOS_CONN[1])
     return CAMPOS_CONN
@@ -2199,13 +2245,11 @@ def paso_render(a, maestra, propuestas, estado_conn):
         por_tabla[c["tabla"]].append(c)
     out_root = R["out"]
     editados, previo_vars, previo_dbt = leer_ediciones(out_root)   # antes de borrar out/
+    gen_prev = llaves_generadas(out_root)               # v6.8 (G2): llaves que propuso el generador en la corrida anterior
     for sub in ("artifacts", "models", "listo", "borrador", "prueba_conexion"):
         shutil.rmtree(out_root / sub, ignore_errors=True)
-    for env, bloque in previo_vars.items():           # valores escritos a mano en out/.../variables.yaml
-        for k, v in bloque.items():
-            if v not in (None, "") and not envs.get(env, {}).get(k) and not propuestas[env].get(k, ("", ""))[0]:
-                propuestas[env][k] = (str(v), "valor manual (out/variables.yaml)")
     manifiesto, conservados = {}, []
+    cipher_sis = False                                # v6.8: ¿alguna tabla del sistema es cipher?
     usos_tot, resumen, fuentes = defaultdict(set), [], defaultdict(list)
     candidatas_prueba = []                            # [(tabla, dict YAML)] de las tablas con YAML, en el orden de la lista (v6.7)
     for t in tablas:
@@ -2224,6 +2268,7 @@ def paso_render(a, maestra, propuestas, estado_conn):
                 if (c.get("incluir") or "sí").lower() != "no"]
         rep_t, usos_t = [], defaultdict(set)
         t["_ef"], t["_extra"], t["_pend"] = estrategia_efectiva(t, cols, maestra), [], []
+        cipher_sis = cipher_sis or t["extractor"] == "cipher"
         files = render_table(t, cols, a, out_root, ctx, rep_t, usos_t) if cols else []
         if cols:
             candidatas_prueba.append((t, t["_yaml"]))
@@ -2233,6 +2278,9 @@ def paso_render(a, maestra, propuestas, estado_conn):
         if not cols:
             pend.append("sin columnas")
         no_aplica = {"usuario", "password"} if t["extractor"] == "cipher" else set()
+        if t["_ef"]["est"] == "snapshot" and not t["_ef"]["pend"] and not filled(t.get("llave_unica")):
+            no_aplica = no_aplica | {"llave_unica"}     # v6.8 (G3): snapshot confirmado sin llave_unica: no es requerida
+            t["_extra"].append("snapshot sin llave_unica: schema.yml sin prueba de unicidad")
         campos = [k for k, q, _ in TABLAS if q in ("manual", "excel") and k not in no_aplica | NUEVAS_CARGA
                   and not filled(t.get(k))]
         if campos:
@@ -2288,6 +2336,22 @@ def paso_render(a, maestra, propuestas, estado_conn):
                                  + ([f"info: {cob}"] if NUEVA in cob else [])})
     usos_tot.pop(PEND, None)
     sis_up = nom_sis.upper()
+    # v6.8 (G2): valores manuales de out/.../variables.yaml solo de llaves que usa este sistema (o que el generador propuso)
+    usadas = set(usos_tot) | {m.group(1) or m.group(2) for txt in editados.values() for m in MARK.finditer(txt)}
+    ignoradas = set()
+    for env, bloque in previo_vars.items():
+        for k, v in bloque.items():
+            if v in (None, "") or envs.get(env, {}).get(k) or propuestas[env].get(k, ("", ""))[0]:
+                continue
+            if k in usadas or k in gen_prev:
+                propuestas[env][k] = (str(v), "valor manual (out/variables.yaml)")
+            else:
+                ignoradas.add(k)
+    if cipher_sis:                                    # v6.8 (G8): usuario y clave cipher van vacíos en el grupo del sistema
+        for env, bloque in envs.items():
+            for k in (f"USER_{sis_up}_CREDENTIALS", f"PASS_{sis_up}_CREDENTIALS"):
+                if k not in bloque and k not in propuestas[env]:
+                    propuestas[env][k] = ("", f"PENDIENTE valor {env}")
     for env, bloque in envs.items():                              # llaves usadas que faltan (policy tags, etc.)
         for k in sorted(usos_tot):
             if k in bloque or k in propuestas[env]:
@@ -2311,6 +2375,9 @@ def paso_render(a, maestra, propuestas, estado_conn):
         if r.get("fuente") and any(f"std_{r['fuente'][0]}/" in n and "a mano" in n for n in notas_src):
             r["pend"].append(f"declarar raw_{r['fuente'][1]} en std_{r['fuente'][0]}/__sources.yml")
             r["estado"] = "BORRADOR"
+    if ignoradas:
+        notas_src.append("AVISO: valores manuales de out/…/variables.yaml ignorados (llaves que este sistema no usa; no se "
+                         f"re-proponen): {', '.join(sorted(ignoradas))}")
     notas_src += escribir_variables(a, out_root, propuestas, nom_sis, list(envs))
     pt_dbt = sorted(k for k, v in usos_tot.items() if "policy_tag" in v and mvars and k not in mvars)
     dbt_nuevas = vars_dbt_faltantes(a, out_root, nom_sis, mvars, envs)
@@ -2377,6 +2444,19 @@ def leer_ediciones(out_root):
         previo_dbt = {e: {**{renombrar(k): x for k, x in v.items() if x},
                           **{renombrar(k): x for k, x in (amb.get(e) or {}).items() if x}} for e in ("dev", "prd")}
     return editados, previo_vars, previo_dbt
+
+
+# v6.8 (G2): comentarios con los que el generador marca las llaves que propone en variables.yaml
+MARCA_PROPUESTA = re.compile(r"#\s*(PENDIENTE valor|desde DL 1\.0|secreto de DL 1\.0|sugerido por convención)")
+
+
+def llaves_generadas(out_root):
+    """Nombres de las llaves que la corrida anterior propuso en out/.../variables.yaml (línea con comentario del generador)."""
+    var = out_root / "artifacts/co/variables.yaml"
+    if not var.exists():
+        return set()
+    return {renombrar(k) for k in (llave_de(l) for l in var.read_text(encoding="utf-8").splitlines()
+                                   if MARCA_PROPUESTA.search(l)) if k}
 
 
 def aplicar_ediciones(files, out_root, editados, manifiesto):
@@ -2453,10 +2533,14 @@ def duplicadas(lines, region):
     return {k: n for k, n in c.items() if n > 1}
 
 
-def verificar_fusion(base, lines, regiones_base, regiones_nuevo):
+def verificar_fusion(base, lines, regiones_base, regiones_nuevo, movidas=None):
     """Control de la fusión: las líneas originales siguen en su orden y no se duplicó ninguna llave por bloque.
+    v6.8: `movidas` = líneas que la fusión movió a propósito (G7); se comparan sin ellas y sin blancos.
     -> texto del problema o ''."""
-    if not es_subsecuencia(base, lines):
+    if movidas is not None:
+        if not es_subsecuencia([l for l in base if l.strip() and l not in movidas], [l for l in lines if l.strip()]):
+            return "se alteraron o reordenaron líneas existentes"
+    elif not es_subsecuencia(base, lines):
         return "se alteraron o reordenaron líneas existentes"
     for rb, rn in zip(regiones_base, regiones_nuevo):
         dup = {k: n for k, n in duplicadas(lines, rn).items() if n > duplicadas(base, rb).get(k, 1)}
@@ -2483,6 +2567,126 @@ def renombrar_variables(texto, envs, info):
     out = "\n".join(lines) + ("\n" if texto.endswith("\n") else "")
     info["residuales"] += residuales(out, "variables.yaml")
     return out, []
+
+
+# v6.8 (G8/G7): grupo por sistema en la sección de buckets y conexiones; formato del equipo
+SECCION_SIS = "Buckets GCP & Connections JDBC | CIPHER"
+CAB_SIS = re.compile(r"^#\s*[A-Za-z0-9_]+\s*$")        # encabezado de grupo de sistema: `# <SIS>`
+
+
+def subgrupos_sistema(S, cipher):
+    """Llaves del grupo `# <S>` en orden fijo, por subgrupo: recursos, conexión y secretos cipher."""
+    rec = [f"{S}_{x}" for x in ("RAW_DATASET", "LND_BUCKET", "RAW_BUCKET")]
+    cred = [f"USER_{S}_CREDENTIALS", f"PASS_{S}_CREDENTIALS"]
+    if cipher:
+        conn = [f"JDBC_{S}", f"{S}_HOST", f"{S}_PORT", f"{S}_SID", *cred, f"{S}_OWNER_DB"]
+        sec = [f"{S}_HASHICORP_SECRET_PATH", f"{S}_SECRET_HOST", f"{S}_HASHICORP_SECRET_USER"]
+    else:
+        conn, sec = [f"JDBC_{S}", *cred, f"{S}_OWNER_DB"], []
+    return rec, conn, sec
+
+
+def _colapsa(t):
+    return re.sub(r"\s+", " ", t.strip().lstrip("#").strip()).lower()
+
+
+def _seccion_sis(lines, ini, fin):
+    """(índice del encabezado de la sección, fin exclusivo) dentro de lines[ini:fin], o None. La sección termina en el
+    siguiente comentario que va tras una línea en blanco y no es `# <SIS>` ni una llave comentada."""
+    h = next((j for j in range(ini, fin) if lines[j].lstrip().startswith("#")
+              and _colapsa(SECCION_SIS) in _colapsa(lines[j])), None)
+    if h is None:
+        return None
+    for j in range(h + 1, fin):
+        l = lines[j].strip()
+        if l.startswith("#") and not CAB_SIS.match(l) and ":" not in l and not lines[j - 1].strip():
+            return h, j
+    return h, fin
+
+
+def _quita(lines, j, fin):
+    """Borra la línea j (dentro del bloque que termina en fin) y el blanco sobrante si quedan dos seguidos. -> líneas borradas."""
+    del lines[j]
+    if j < fin - 1 and not lines[j].strip() and (j == 0 or not lines[j - 1].strip()):
+        del lines[j]
+        return 2
+    return 1
+
+
+def ubicar_sistema(lines, ini, fin, titulo, K, cipher, linea, kin, movidas):
+    """v6.8 (G8/G7): arma el grupo `# <SIS>` del sistema en la sección SECCION_SIS de lines[ini:fin] (bloque de un
+    ambiente), en orden alfabético entre los grupos de sistema. Las llaves del sistema (K) sueltas en el bloque se
+    MUEVEN al grupo (conservan valor y comentario); las ausentes se generan con linea(k). Un grupo existente se
+    reconstruye en su sitio y lo que no es llave conocida del sistema queda al final. Las líneas movidas o reescritas
+    van a `movidas` (control de la fusión). -> (ok, nombres de llaves movidas); ok False = no hay sección."""
+    S = titulo.upper()
+    if _seccion_sis(lines, ini, fin) is None:
+        return False, []
+    conocidas = {k for sg in subgrupos_sistema(S, True) for k in sg}
+    simple = lambda j: not any(x.strip() and not x.lstrip().startswith("#")        # sin valor multilínea debajo
+                               and len(x) - len(x.lstrip()) > len(lines[j]) - len(lines[j].lstrip()) for x in lines[j + 1:j + 2])
+    h = next((j for j in range(ini, fin) if CAB_SIS.match(lines[j].strip()) and _colapsa(lines[j]).upper() == S), None)
+    prop, extras, e = {}, [], h
+    if h is not None:                       # rachas del grupo: la primera siempre; las siguientes solo con llaves del sistema
+        j = h + 1
+        e = j
+        while j < fin:
+            r0 = j
+            while j < fin and lines[j].strip():
+                j += 1
+            racha = lines[r0:j]
+            if r0 > h + 1 and not all(llave_de(x) in conocidas for x in racha):
+                break
+            for x in racha:
+                k = llave_de(x)
+                if k in conocidas and k not in prop:
+                    prop[k] = x
+                else:
+                    extras.append(x)
+            e = max(e, j)
+            while j < fin and not lines[j].strip():
+                j += 1
+        movidas.update(x for x in lines[h:e] if x.strip())
+    dentro = lambda j: h is not None and h <= j < e
+    sueltas = []
+    for j in range(ini, fin):
+        k = llave_de(lines[j])
+        if k in K and not dentro(j) and simple(j) and k not in prop:
+            sueltas.append((k, j))
+            prop[k] = lines[j]
+    ocupadas = {sk for sk, _ in sueltas} | set(prop)
+    complejas = {llave_de(lines[j]) for j in range(ini, fin) if llave_de(lines[j]) in K and not dentro(j)} - ocupadas
+    movidas.update(lines[j] for _, j in sueltas)
+    for _, j in sorted(sueltas, key=lambda x: -x[1]):   # de abajo hacia arriba: los índices previos no cambian
+        n = _quita(lines, j, fin)
+        fin -= n
+        if h is not None and j < h:
+            h, e = h - n, e - n
+    g = []
+    for sg in (*subgrupos_sistema(S, cipher), None):
+        ls = extras if sg is None else [prop.get(k) or linea(k) for k in sg if (k in K or k in prop) and k not in complejas]
+        if ls:
+            g += ([""] if g else []) + ls
+    g = [f"{' ' * kin}# {S}"] + g
+    sh, se = _seccion_sis(lines, ini, fin)
+    if h is not None and sh < h < se:                    # ya está en la sección: se reconstruye en su sitio
+        lines[h:e] = g
+        return True, [k for k, _ in sueltas]
+    if h is not None:                                    # estaba fuera de la sección: se saca y se reubica
+        del lines[h:e]
+        fin -= e - h
+        while h < fin and not lines[h].strip():
+            del lines[h]
+            fin -= 1
+    sh, se = _seccion_sis(lines, ini, fin)
+    sist = [j for j in range(sh + 1, se) if CAB_SIS.match(lines[j].strip()) and (j == sh + 1 or not lines[j - 1].strip())]
+    sig = next((j for j in sist if _colapsa(lines[j]).upper() > S), None)
+    if sig is not None:
+        lines[sig:sig] = g + [""]
+    else:
+        ult = max((j for j in range(sh + 1, se) if lines[j].strip()), default=sh)
+        lines[ult + 1:ult + 1] = ([""] if ult > sh else []) + g
+    return True, [k for k, _ in sueltas]
 
 
 def fusionar_variables(texto, propuestas, solo_con_valor=False, titulo="", ordenado=True, info=None, envs_ren=None):
@@ -2514,31 +2718,56 @@ def fusionar_variables(texto, propuestas, solo_con_valor=False, titulo="", orden
                 v, c = props[k]
                 lines[j] = f"{' ' * kin}{k}: {q(v)}" + (f"   # {c}" if c else "")
     base = list(lines)
+    movidas, movidas_k = set(), set()
+    K, cipher = set(), False
+    if titulo and ordenado:                               # v6.8 (G8): llaves del grupo del sistema, iguales en todos los bloques
+        conocidas = {k for sg in subgrupos_sistema(titulo.upper(), True) for k in sg}
+        K = {k for k in elegidas if k in conocidas}
+        for env in propuestas:
+            b = bloque_env(lines, env)
+            K |= {llave_de(l) for l in lines[b[0] + 1:b[1]]} & conocidas if b else set()
+        S = titulo.upper()
+        cipher = bool(K & {f"{S}_{x}" for x in ("HOST", "PORT", "SID", "HASHICORP_SECRET_PATH", "SECRET_HOST",
+                                                  "HASHICORP_SECRET_USER")})
+        if cipher:
+            K |= {f"USER_{S}_CREDENTIALS", f"PASS_{S}_CREDENTIALS"}
     for env in propuestas:
         b = bloque_env(lines, env)
         if not b:
             continue
         ini, fin, kin = b
         props = propuestas[env]
-        nuevas = []
-        for k in sorted(elegidas):
+        def linea(k):
             v, c = props.get(k, ("", f"PENDIENTE valor {env}"))
             if not v and not c.startswith("PENDIENTE"):
                 c = f"PENDIENTE valor {env}"
-            nuevas.append((k, f"{' ' * kin}{k}: {q(v) if v else chr(39) * 2}" + (f"   # {c}" if c else "")))
-        if titulo:
-            (ubicar_llaves if ordenado else insertar_grupo)(lines, ini + 1, fin, titulo, nuevas, kin)
+            return f"{' ' * kin}{k}: {q(v) if v else chr(39) * 2}" + (f"   # {c}" if c else "")
+        nuevas = [(k, linea(k)) for k in sorted(elegidas)]
+        if titulo and ordenado:
+            ubicar_llaves(lines, ini + 1, fin, titulo, [x for x in nuevas if x[0] not in K], kin)   # el resto, como antes
+            ini, fin, kin = bloque_env(lines, env)
+            ok, mv = ubicar_sistema(lines, ini + 1, fin, titulo, K, cipher, linea, kin, movidas)
+            if not ok:                                    # sin la sección: criterio anterior y aviso
+                ubicar_llaves(lines, ini + 1, fin, titulo, [(k, linea(k)) for k in sorted(K)], kin)
+                notas.append(f"variables.yaml: no se encontró la sección `# {SECCION_SIS}` en {env}; el grupo `# {titulo.upper()}` "
+                             "se ubicó con el criterio anterior")
+            movidas_k |= set(mv)
+        elif titulo:
+            insertar_grupo(lines, ini + 1, fin, titulo, nuevas, kin)
         else:
             ya = {llave_de(l) for l in lines[ini + 1:fin]}
             lines[fin:fin] = [x for k, x in nuevas if k not in ya]
     if ordenado and titulo:                               # control: sin cambios a lo existente ni llaves duplicadas
         def regiones(ls):
             return [(b[0] + 1, b[1]) for b in (bloque_env(ls, e) for e in propuestas) if b]
-        mal = verificar_fusion(base, lines, regiones(base), regiones(lines))
+        mal = verificar_fusion(base, lines, regiones(base), regiones(lines), movidas or None)
         if mal:
             res, n2 = fusionar_variables(texto, propuestas, solo_con_valor, titulo, ordenado=False)   # texto ya renombrado
             return res, n2 + [f"variables.yaml: la ubicación ordenada falló ({mal}); se usó el grupo `# {titulo}` "
                               "al final de cada bloque"]
+    if movidas_k:
+        notas.append(f"variables.yaml: llaves del sistema movidas al grupo `# {titulo.upper()}` (valor y comentario "
+                     f"conservados; solo nombres): {', '.join(sorted(movidas_k))}")
     return "\n".join(lines) + "\n", notas
 
 def escribir_variables(a, out_root, propuestas, titulo="", envs=None):
@@ -3523,6 +3752,18 @@ def escribir_retiro(a, maestra, out_root, resumen):
 # ----------------------------------------------------------------------------- lista de trabajo
 BASE_LISTA = ["tabla_origen", "sistema_origen", "dominio", "subdominio"]
 COLS_LISTA = BASE_LISTA + ["extractor"]   # extractor: cipher | jdbc (se lee en memoria, no se copia)
+# v6.8 (H1): encabezado de Excel (Tabla de origen ; Sistema de origen ; ... ; Extractor (JDBC | CIPHER)) -> nombres canónicos
+ALIAS_LISTA = {"tabla_de_origen": "tabla_origen", "sistema_de_origen": "sistema_origen", "extractor_jdbc_cipher": "extractor"}
+
+
+def leer_lista(path):
+    """Filas de in/new_migration_tables_to_dl2.csv con las columnas canónicas; acepta el encabezado de Excel sin
+    reescribir el archivo. Si vienen ambos nombres, gana el canónico."""
+    out = []
+    for r in read_csv(path):
+        canon = {ALIAS_LISTA[k]: v for k, v in r.items() if k in ALIAS_LISTA}
+        out.append({**canon, **{k: v for k, v in r.items() if k not in ALIAS_LISTA}})
+    return out
 
 
 def preparar_sistema(sis, filas_lista):
@@ -3592,7 +3833,7 @@ if __name__ == "__main__":
         write_csv(LISTA, [], COLS_LISTA)
         sys.exit(f"in/{LISTA.name} creado: pegar {';'.join(COLS_LISTA)} y volver a correr")
     grupos = defaultdict(list)
-    lista = [r for r in read_csv(LISTA) if r.get("tabla_origen")]
+    lista = [r for r in leer_lista(LISTA) if r.get("tabla_origen")]
     a.extractores = {r["tabla_origen"].upper(): r.get("extractor", "") for r in lista}
     if lista and "extractor" not in lista[0]:
         print(f"  aviso: in/{LISTA.name} sin columna extractor (cipher | jdbc): se usa la variante existente o jdbc")
