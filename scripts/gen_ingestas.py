@@ -34,7 +34,7 @@ from datetime import date
 from pathlib import Path
 import yaml
 
-VERSION, GEN, MARCA = "6.8.3", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
+VERSION, GEN, MARCA = "6.8.4", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
 HERE = Path(__file__).resolve().parent
 IN, OUT = HERE / "in", HERE / "out"          # in: catálogos y lista · out/<sistema>/{in,out}
 LISTA = IN / "new_migration_tables_to_dl2.csv"
@@ -1962,7 +1962,14 @@ def render_table(t, cols, a, out, ctx, rep, usos):
     art = out / "artifacts/co/data_source" / sis / tab
     files = [(art / f"{name}.yaml", ytxt), (art / f"{name}.json", jtxt)]
 
-    existente = next(Path(a.models).glob(f"{DBT}/models/**/{m0}.sql"), None)
+    # v6.8.4: la carpeta del modelo la define el dominio de la lista (std_<dominio>/<sis>_<tabla>); un modelo con el mismo nombre
+    # en otra carpeta no se reutiliza: se avisa para retirarlo
+    md = Path(f"{DBT}/models") / f"std_{t['dominio']}" / name
+    en_otra = [x for x in Path(a.models).glob(f"{DBT}/models/**/{m0}.sql") if x.parent.relative_to(Path(a.models)) != md]
+    if en_otra:
+        extra.append("AVISO modelo existente en otra carpeta/dominio: " + ", ".join(x.relative_to(a.models).as_posix() for x in en_otra)
+                     + f" (el generado va a {md.as_posix()} según la lista: retirar el anterior)")
+    existente = next((x for x in Path(a.models).glob(f"{DBT}/models/**/{m0}.sql") if x not in en_otra), None)
     if cdc and existente and "row_hash" not in existente.read_text(encoding="utf-8", errors="replace"):
         rel_m = existente.relative_to(a.models).as_posix()
         en_prd = subprocess.run(["git", "-C", str(a.models), "cat-file", "-e", f"origin/{CLI["env_prd"]}:{rel_m}"],
@@ -1977,8 +1984,6 @@ def render_table(t, cols, a, out, ctx, rep, usos):
         rep.append(f"  - modelo existente sin marca: {existente.relative_to(a.models).as_posix()} "
                    "(se conserva; --force para normalizarlo)")
     else:
-        md = (existente.parent.relative_to(Path(a.models)) if existente
-              else Path(f"{DBT}/models") / f"std_{t['dominio']}" / name)
         dyn = labels_dinamicos(a, envs)
         files += [(out / "models" / md / f"{m0}.sql",
                    model_sql_cdc(t, cols, pii, dyn, ef) if cdc else model_sql(t, cols, pii, dyn)),
