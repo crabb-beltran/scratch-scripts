@@ -34,7 +34,7 @@ from datetime import date
 from pathlib import Path
 import yaml
 
-VERSION, GEN, MARCA = "6.8.1", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
+VERSION, GEN, MARCA = "6.8.2", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
 HERE = Path(__file__).resolve().parent
 IN, OUT = HERE / "in", HERE / "out"          # in: catálogos y lista · out/<sistema>/{in,out}
 LISTA = IN / "new_migration_tables_to_dl2.csv"
@@ -1246,9 +1246,10 @@ def cmd_scan(a):
             "raw_table": tabla,                                            # v6.8.1: raw_table = tabla
             "dbt_model": "|".join([f"{nombre_sis(sistema)}_{tabla}_hist"] + [renombrar(m_) for m_ in (hit or {}).get("dbt_models") or []
                                    if not re.search(r"_(hist|current)$", m_)]),   # v6.8.1: _hist (+ _current en CDC) + otros existentes (_aggr…)
-            "tecnologia": TECH.get(m.group(1).lower()) if m else src1.get("tecnologia", ""),
-            "tabla_fuente": origen_v1[0]["tabla"] if origen_v1 and origen_v1[0]["tabla"]
-                            else re.sub(rf"^{re.escape(sistema)}_", "", base, flags=re.I).upper(),
+            # v6.8.2: tabla_fuente = tabla de origen tal cual (la que lee el FROM); tecnología = la de esa tabla en DL 1.0
+            # (stg_sql_* puede vivir en el ODS Oracle); el prefijo stg_ solo se usa si DL 1.0 no la tiene
+            "tecnologia": hits1[0]["tecnologia"] if hits1 else (TECH.get(m.group(1).lower()) if m else src1.get("tecnologia", "")),
+            "tabla_fuente": re.sub(rf"^{re.escape(sistema)}_", "", nombre, flags=re.I).upper(),
             "scheduling": (hit or {}).get("scheduling") or "35 06 * * *",
             "evidencia_dl2": (hit or {}).get("yaml", "") + (            # v6.8.1: la ingesta existente usa otros nombres
                 f" (nombres existentes distintos: carpeta '{hit['tabla']}', raw '{hit['raw_table']}': renombrar o retirar)"
@@ -2159,9 +2160,10 @@ def paso_conexiones(a, maestra, envs):
     llaves nuevas con el valor de DL 1.0 por ambiente. Actualiza el CSV de tablas (sin pisar lo manual)."""
     tpath = rutas(maestra)["tablas"]
     rows = [{k: (r.get(k) or d) for k, _, d in FILA} for r in leer_tablas(tpath)]
-    nombre = lambda r: (STG.match(r["tabla_origen"].rpartition(".")[2]) or [None, None, r["tabla_origen"].rpartition(".")[2]])[2].lower()
+    nombre = lambda r: r["tabla_origen"].rpartition(".")[2].lower()            # v6.8.2: la tabla tal cual (stg_sql_x)
+    alterno = lambda r: (STG.match(nombre(r)) or [None, None, nombre(r)])[2].lower()   # respaldo: sin prefijo stg_
     refs = cargar_config(a)
-    conn = conexiones_dl1(a, refs, {nombre(r) for r in rows if r.get("caso") != "D"})
+    conn = conexiones_dl1(a, refs, {x for r in rows if r.get("caso") != "D" for x in (nombre(r), alterno(r))})
     propuestas, estado, traza = defaultdict(dict), {}, []
     for r in rows:
         n, sis = nombre(r), r["sistema"]
@@ -2169,7 +2171,7 @@ def paso_conexiones(a, maestra, envs):
             continue
         auto = {x.split("=")[0].strip() for x in r.get("llaves_sugeridas", "").split(",") if "=" in x}
         notas, fuentes, info = [], [], []
-        por_env = {env: conn.get(env, {}).get(n) for env in envs}
+        por_env = {env: conn.get(env, {}).get(n) or conn.get(env, {}).get(alterno(r)) for env in envs}
         ref_c = next((c for c in (por_env.get(ENV_PRD), *por_env.values()) if c), None)
         det = []
         if ref_c:
