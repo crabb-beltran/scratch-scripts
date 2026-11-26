@@ -34,7 +34,7 @@ from datetime import date
 from pathlib import Path
 import yaml
 
-VERSION, GEN, MARCA = "6.8", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
+VERSION, GEN, MARCA = "6.8.1", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
 HERE = Path(__file__).resolve().parent
 IN, OUT = HERE / "in", HERE / "out"          # in: catálogos y lista · out/<sistema>/{in,out}
 LISTA = IN / "new_migration_tables_to_dl2.csv"
@@ -989,8 +989,10 @@ def resolver(row, envs, idx, infos, conv):
     m = STG.match(nombre)
     base = m.group(2) if m else nombre
     hit = idx.get(nombre.upper()) or idx.get(base.upper())
-    sistema = codigo_sis(hit["sistema"]) if hit else code(row["sistema_origen"])
-    tabla = hit["tabla"] if hit else norm(re.sub(rf"^{re.escape(sistema)}_", "", base, flags=re.I))
+    # v6.8.1: el sistema lo define la lista y la tabla es el nombre de la tabla de origen tal cual (no quita stg_ ni hereda
+    # la carpeta de una ingesta existente; el prefijo stg_ solo sirve para buscar en DL 1.0 / DL 2.0)
+    sistema = code(row["sistema_origen"]) if (row.get("sistema_origen") or "").strip() else (codigo_sis(hit["sistema"]) if hit else PEND)
+    tabla = norm(re.sub(rf"^{re.escape(sistema)}_", "", nombre, flags=re.I))
     return nombre, m, base, hit, sistema, tabla
 
 
@@ -1241,13 +1243,16 @@ def cmd_scan(a):
         caso = ("B" if lee_ods else "A") if hit else ("C" if hits1 or origen_v1 else "D")
         auto = {
             "caso": caso, "sistema": sistema, "tabla": tabla,
-            "raw_table": renombrar((hit or {}).get("raw_table") or tabla),
-            "dbt_model": "|".join(renombrar(m_) for m_ in ((hit or {}).get("dbt_models") or [f"{nombre_sis(sistema)}_{tabla}_hist"])),
+            "raw_table": tabla,                                            # v6.8.1: raw_table = tabla
+            "dbt_model": "|".join([f"{nombre_sis(sistema)}_{tabla}_hist"] + [renombrar(m_) for m_ in (hit or {}).get("dbt_models") or []
+                                   if not re.search(r"_(hist|current)$", m_)]),   # v6.8.1: _hist (+ _current en CDC) + otros existentes (_aggr…)
             "tecnologia": TECH.get(m.group(1).lower()) if m else src1.get("tecnologia", ""),
             "tabla_fuente": origen_v1[0]["tabla"] if origen_v1 and origen_v1[0]["tabla"]
                             else re.sub(rf"^{re.escape(sistema)}_", "", base, flags=re.I).upper(),
             "scheduling": (hit or {}).get("scheduling") or "35 06 * * *",
-            "evidencia_dl2": (hit or {}).get("yaml", ""),
+            "evidencia_dl2": (hit or {}).get("yaml", "") + (            # v6.8.1: la ingesta existente usa otros nombres
+                f" (nombres existentes distintos: carpeta '{hit['tabla']}', raw '{hit['raw_table']}': renombrar o retirar)"
+                if hit and (hit["tabla"].lower() != tabla or str(hit["raw_table"]).lower() != tabla) else ""),
             "conexion_dl2_actual": " | ".join(key_of(hit["refs"].get(p, "")) for p in ("source.address", "extractor.host", "@owner")
                                               if hit and hit["refs"].get(p)),
             "dl2_lee_ods": "sí" if lee_ods else "no", "dl2_gen": "sí" if hit and hit["marca"] else "no",
@@ -2268,6 +2273,9 @@ def paso_render(a, maestra, propuestas, estado_conn):
                 if (c.get("incluir") or "sí").lower() != "no"]
         rep_t, usos_t = [], defaultdict(set)
         t["_ef"], t["_extra"], t["_pend"] = estrategia_efectiva(t, cols, maestra), [], []
+        ev = t.get("evidencia_dl2") or ""
+        if "nombres existentes distintos" in ev:                       # v6.8.1: aviso, no bloquea
+            t["_extra"].append("AVISO ingesta DL 2.0 existente " + ev)
         cipher_sis = cipher_sis or t["extractor"] == "cipher"
         files = render_table(t, cols, a, out_root, ctx, rep_t, usos_t) if cols else []
         if cols:
