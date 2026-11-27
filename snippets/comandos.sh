@@ -1,10 +1,18 @@
-# repos: <repo-artifacts> y <repo-data-models> · rama nueva <rama-trabajo>
-# Reemplazar antes de correr: <ruta-repos> · <ruta-scratch> · <repo-artifacts> · <repo-data-models> · <rama-trabajo> · <sis> (argumento del generador) · <prefijo-tabla> (prefijo de las filas de la tabla en ESTADO.md)
-cd "<ruta-repos>"
-for R in <repo-artifacts> <repo-data-models>; do
-  git -C $R status --porcelain | head -3
-  git -C $R switch -q -c <rama-trabajo> origin/co-prd --no-track && git -C $R status -sb | head -1
-done
-cd "<ruta-scratch>/scripts"
-python gen_ingestas.py <sis> 2>&1 | tail -4
-grep -E '^\| <prefijo-tabla>' out/<sis>/out/ESTADO.md | cut -c1-300
+# repo: <repo-legacy> (solo lectura, rama productiva DL 1.0)
+# Reemplazar antes de correr: <ruta-repos> · <repo-legacy> · <rama-prd-legacy> · <ruta-cookiecutter> (regex de la ruta del cookiecutter.json de la tabla, p. ej. 'owner/tabla/cookiecutter.json')
+cd "<ruta-repos>/<repo-legacy>"
+F=$(git ls-tree -r --name-only origin/<rama-prd-legacy> | grep -i '<ruta-cookiecutter>')
+echo "$F"
+git show "origin/<rama-prd-legacy>:$F" | python -c "
+import json,sys,re
+d=json.load(sys.stdin)
+print('raíz:', [k for k in d if not isinstance(d[k],dict)])
+for k,v in d.items():
+    if isinstance(v,dict):
+        print('bloque', k, '->', list(v))
+        cols=str(v.get('cols',''))
+        print('  cols con AS:', [c.strip()[:90] for c in cols.split(',') if ' AS ' in c.upper()][:5])
+        q=str(v.get('query',''))
+        print('  query: SELECT', len(q), 'car. · AS:', len(re.findall(r'\sAS\s',q,re.I)), '· WHERE:', re.sub(r'\s+',' ',q[q.upper().find('WHERE'):][:160]) if 'WHERE' in q.upper() else 'no')
+print('is_incremental_load:', d.get('is_incremental_load'), '· schedule:', d.get('schedule'))
+"
