@@ -34,7 +34,7 @@ from datetime import date
 from pathlib import Path
 import yaml
 
-VERSION, GEN, MARCA = "6.8.4", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
+VERSION, GEN, MARCA = "6.8.5", "v1", "dl2-gen"   # v6.8 (26-nov-2026)
 HERE = Path(__file__).resolve().parent
 IN, OUT = HERE / "in", HERE / "out"          # in: catálogos y lista · out/<sistema>/{in,out}
 LISTA = IN / "new_migration_tables_to_dl2.csv"
@@ -58,7 +58,8 @@ CLIENTE_DEFECTO = {
     "nombres_anteriores": {},      # opcional: {codigo_sistema: [nombres de recurso usados antes]} para migrar valores de buckets/dataset
     "aprobacion_total": False,     # True: solo `aprobado` pasa a LISTO (con False, `sugerido` también pasa)
     "umbral_borrado": 0.2,         # CDC: fracción de borrados sobre lo vigente a partir de la cual el modelo aborta
-    "prefijo_dag": "xx_",          # prefijo del id del DAG de extracción en Composer: <prefijo><sistema>_<tabla>-extraction
+    "prefijo_dag": "xx_",
+    "csv_encoding": "",            # v6.8.5: csv.encoding del extractor JDBC; vacío = no se emite (default del extractor)          # prefijo del id del DAG de extracción en Composer: <prefijo><sistema>_<tabla>-extraction
     # opcional: prueba de conexión permanente. minutos_antes = minutos antes de la primera extracción del sistema;
     # scheduling no vacío fuerza ese cron (en lugar del calculado)
     "prueba_conexion": {"minutos_antes": 30, "scheduling": ""},
@@ -1925,7 +1926,8 @@ def render_table(t, cols, a, out, ctx, rep, usos):
                   "gcp.bigquery.raw.raw_skip_lines": "1",
                   "extractor.resources": {"requests": dict(r), "limits": dict(r)}})
         envv = {"source.query_string": query, "source.batch_size": FIJOS["batch_size"],
-                "csv.encoding": FIJOS["encoding"], "process_file": False,
+                **({"csv.encoding": CLI["csv_encoding"]} if CLI.get("csv_encoding") else {}),   # v6.8.5: solo si se configura
+                "process_file": False,
                 "source.datasource.username": ref(t["usuario"]), "source.datasource.password": ref(t["password"])}
         if t["tecnologia"] == "oracle":
             envv["source.datasource.oracle_connection_type"] = "jdbc"
@@ -2211,8 +2213,9 @@ def paso_conexiones(a, maestra, envs):
             manual = filled(r[campo]) and campo not in auto and ok(r[campo])
             if filled(r[campo]) and not ok(r[campo]):         # llave de la otra variante: se reemplaza y se informa
                 info.append(f"{campo} {r[campo]} reemplazada: no corresponde a la variante {r['extractor']}")
+            propia = lambda k: bool(re.search(rf"(^|_){re.escape(nombre_sis(sis).upper())}(_|$)", k))   # v6.8.5: solo llaves del sistema
             existente = next((k for env in sorted(envs, reverse=True) for k, v in envs[env].items()
-                              if ok(k) and por_env.get(env) and coincide_dl1(campo, por_env[env], v, cipher, envs[env], k)), "")
+                              if ok(k) and propia(k) and por_env.get(env) and coincide_dl1(campo, por_env[env], v, cipher, envs[env], k)), "")
             nombre_llave = r[campo] if manual else (existente or (r[campo] if filled(r[campo]) and ok(r[campo])
                                                                   else patron.format(S=nombre_sis(sis).upper())))
             if not manual:

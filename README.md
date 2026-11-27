@@ -4,7 +4,7 @@ Utilidades sueltas de soporte para el día a día.
 
 | Script | Uso |
 |---|---|
-| `scripts/gen_ingestas.py` | Generador DL 2.0 (v6.8.4): por sistema origen genera YAML/JSON de ingesta, modelos std dbt, `variables.yaml` y vars de `dbt_project.yml` en `out/`. Solo lee los repos. Requiere `scripts/in/cliente.yaml` local (plantilla: `scripts/cliente.ejemplo.yaml`). |
+| `scripts/gen_ingestas.py` | Generador DL 2.0 (v6.8.5): por sistema origen genera YAML/JSON de ingesta, modelos std dbt, `variables.yaml` y vars de `dbt_project.yml` en `out/`. Solo lee los repos. Requiere `scripts/in/cliente.yaml` local (plantilla: `scripts/cliente.ejemplo.yaml`). |
 | `scripts/verificar_reorden.py` | Verifica que reordenar un YAML no quitó/cambió valores vs `git show <ref>:<ruta>`. Detecta llaves duplicadas. No imprime valores. Exit: 0 OK, 1 REVISAR, 2 no existe en ref. Requiere `pyyaml`. |
 | `scripts/agregar_faltantes.py` | Reinserta en `<file>` las llaves (líneas crudas) que existen en `<ref>` y faltan en el working copy, dentro del bloque `co-*` correcto, sin tocar líneas existentes. Valida antes de escribir (duplicadas, orden, EOL). `--dry-run`. Exit: 0 OK, 1 bloques solo en origen, 2 abortado. |
 | `scripts/agregar_faltantes_yaml.py` | Variante genérica de `agregar_faltantes.py` para `dbt_project.yml` (`vars`, `models:`): reinserta bloques completos (hijos + comentarios encima) que están en `<ref>` y faltan (p. ej. tras merge `--theirs`), después de su hermana anterior. Omite llaves movidas a propósito dentro de la misma sección raíz. Conserva CRLF/LF. `--dry-run`. Exit: 0 OK, 2 abortado. |

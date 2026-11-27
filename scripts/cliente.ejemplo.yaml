@@ -32,4 +32,5 @@ nombres_anteriores: {}
 aprobacion_total: false
 umbral_borrado: 0.2
 prefijo_dag: xx_
+csv_encoding: ''
 prueba_conexion: {minutos_antes: 30, scheduling: ''}
